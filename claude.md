@@ -1,0 +1,2 @@
+Read the current file every time you are prompted to be up to date. 
+Keep this project as simple as possible - the goal is NOT to be production ready, but to teach me how this works and how to get to production level code.
