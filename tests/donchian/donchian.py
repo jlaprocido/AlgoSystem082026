@@ -56,7 +56,7 @@ def walkforward_donch(ohlc: pd.DataFrame, train_lookback: int = 252 * 4, train_s
 
 if __name__ == '__main__':
 
-    df = get_bars("AAPL", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval="1d")
+    df = get_bars("APLD", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval="1d")
 
     best_lookback, best_real_pf = optimize_donchian(df)
 

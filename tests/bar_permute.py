@@ -1,6 +1,11 @@
 # Good for cypto data, DAILY STOCK DATA, but not intraday due to the jump between open and close
 # Read "Permutation and randomization tests for trading system development to fix this
-# if your strategy includes volume, will need to be creative as volume can have a trend over time
+#
+# Volume is permuted alongside the intrabar (high/low/close) shuffle, using the same
+# permutation index -- so a bar's volume stays paired with that bar's own range/shape,
+# just relocated to a different time slot. This preserves the price-volume relationship
+# within a bar (e.g. big-range bars tend to have high volume) while still destroying the
+# temporal ordering, which is what the permutation test needs.
 
 import numpy as np
 import pandas as pd
@@ -31,16 +36,19 @@ def get_permutation(
     perm_n = n_bars - perm_index
 
     start_bar = np.empty((n_markets, 4))
+    start_volume = np.empty(n_markets)
     relative_open = np.empty((n_markets, perm_n))
     relative_high = np.empty((n_markets, perm_n))
     relative_low = np.empty((n_markets, perm_n))
     relative_close = np.empty((n_markets, perm_n))
+    log_volume = np.empty((n_markets, perm_n))
 
     for mkt_i, reg_bars in enumerate(ohlc):
         log_bars = np.log(reg_bars[['open', 'high', 'low', 'close']])
 
         # Get start bar
         start_bar[mkt_i] = log_bars.iloc[start_index].to_numpy()  # type: ignore
+        start_volume[mkt_i] = np.log(reg_bars['volume'].iloc[start_index])
 
         # Open relative to last close
         r_o = (log_bars['open'] - log_bars['close'].shift()).to_numpy()  # type: ignore
@@ -49,19 +57,23 @@ def get_permutation(
         r_h = (log_bars['high'] - log_bars['open']).to_numpy()  # type: ignore
         r_l = (log_bars['low'] - log_bars['open']).to_numpy()  # type: ignore
         r_c = (log_bars['close'] - log_bars['open']).to_numpy()  # type: ignore
+        bar_volume = np.log(reg_bars['volume']).to_numpy()  # type: ignore
 
         relative_open[mkt_i] = r_o[perm_index:]
         relative_high[mkt_i] = r_h[perm_index:]
         relative_low[mkt_i] = r_l[perm_index:]
         relative_close[mkt_i] = r_c[perm_index:]
+        log_volume[mkt_i] = bar_volume[perm_index:]
 
     idx = np.arange(perm_n)
 
-    # Shuffle intrabar relative values (high/low/close)
+    # Shuffle intrabar relative values (high/low/close) and volume together, so a bar's
+    # range and volume stay paired -- they just move to a different time slot
     perm1 = np.random.permutation(idx)
     relative_high = relative_high[:, perm1]
     relative_low = relative_low[:, perm1]
     relative_close = relative_close[:, perm1]
+    log_volume = log_volume[:, perm1]
 
     # Shuffle last close to open (gaps) seprately
     perm2 = np.random.permutation(idx)
@@ -71,13 +83,16 @@ def get_permutation(
     perm_ohlc = []
     for mkt_i, reg_bars in enumerate(ohlc):
         perm_bars = np.zeros((n_bars, 4))
+        perm_vol = np.zeros(n_bars)
 
-        # Copy over real data before start index 
+        # Copy over real data before start index
         log_bars = np.log(reg_bars[['open', 'high', 'low', 'close']]).to_numpy().copy()  # type: ignore
         perm_bars[:start_index] = log_bars[:start_index]
-        
+        perm_vol[:start_index] = np.log(reg_bars['volume']).to_numpy()[:start_index]  # type: ignore
+
         # Copy start bar
         perm_bars[start_index] = start_bar[mkt_i]
+        perm_vol[start_index] = start_volume[mkt_i]
 
         for i in range(perm_index, n_bars):
             k = i - perm_index
@@ -85,9 +100,12 @@ def get_permutation(
             perm_bars[i, 1] = perm_bars[i, 0] + relative_high[mkt_i][k]
             perm_bars[i, 2] = perm_bars[i, 0] + relative_low[mkt_i][k]
             perm_bars[i, 3] = perm_bars[i, 0] + relative_close[mkt_i][k]
+            perm_vol[i] = log_volume[mkt_i][k]
 
         perm_bars = np.exp(perm_bars)
+        perm_vol = np.exp(perm_vol)
         perm_bars = pd.DataFrame(perm_bars, index=time_index, columns=['open', 'high', 'low', 'close'])
+        perm_bars['volume'] = perm_vol
 
         perm_ohlc.append(perm_bars)
 

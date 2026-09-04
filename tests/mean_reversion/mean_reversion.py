@@ -7,7 +7,7 @@ from src.data.market_data import get_bars
 from src.backtest.costs import apply_slippage
 from src.bar_config import BAR_CONFIG
 
-INTERVAL = "1m"  # flip to "1d" (or "1h") to run everything below at a different bar frequency
+INTERVAL = "1d"  # flip to "1d" (or "1h") to run everything below at a different bar frequency
 
 def mean_reversion(df: pd.DataFrame, window: int, interval: str, zscore: float):
 
@@ -54,7 +54,7 @@ def walkforward_mean_reversion(ohlc: pd.DataFrame, window: int, interval: str,
 
 
 if __name__ == '__main__':
-    df = get_bars("AAPL", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval=INTERVAL)
+    df = get_bars("WMT", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval=INTERVAL)
 
     best_zscore, best_pf = optimize_mean_reversion(df, window=20, interval=INTERVAL, zscore=1)
     print(f"Best Z-Score: {best_zscore}, Best Profit: {best_pf}")
