@@ -4,19 +4,28 @@ import yfinance as yf
 
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+ALPACA_TIMEFRAMES = {
+    "1d": TimeFrame.Day,
+    "1m": TimeFrame.Minute,
+    "1h": TimeFrame.Hour,
+    "5m": TimeFrame(5, TimeFrameUnit.Minute), # type: ignore[reportArgumentType]
+    "15m": TimeFrame(15, TimeFrameUnit.Minute), # type: ignore[reportArgumentType]
+    "30m": TimeFrame(30, TimeFrameUnit.Minute), # type: ignore[reportArgumentType]
+    "1wk": TimeFrame.Week,
+    "1mo": TimeFrame.Month
+}
+
 
 from src.config import get_alpaca_client
 
 STANDARD_COLUMNS = ["open", "high", "low", "close", "volume"]
 PRICE_COLS = ["open", "high", "low", "close"]
-ALPACA_TIMEFRAMES = {"1d": TimeFrame.Day, "1m": TimeFrame.Minute, "1h": TimeFrame.Hour, "1wk": TimeFrame.Week, "1mo": TimeFrame.Month
-}
-
 
 
 def get_yfinance_bars(symbol: str, start: dt.date, end: dt.date, interval: str = "1d") -> pd.DataFrame:
-    raw = yf.download(symbol, start=start, end=end, interval=interval, auto_adjust=False)
+    raw = yf.download(symbol, start=start, end=end, interval=interval, auto_adjust=True)
     assert raw is not None, "yfinance returned no data"
 
     # yfinance gives MultiIndex columns when you pass multiple tickers,
