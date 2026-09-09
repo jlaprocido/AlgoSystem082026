@@ -23,10 +23,11 @@ def three_sma_strategy(df: pd.DataFrame, fast_window: int = 10, med_window: int 
     df['strategy_return'] = apply_slippage(df['signal'], df['return'])
 
     r = df['strategy_return']
-    profit_factor = r[r > 0].sum() / r[r < 0].abs().sum()
+    gross_loss = r[r < 0].abs().sum()
+    profit_factor = r[r > 0].sum() / gross_loss if gross_loss > 0 else np.nan
 
     bars_per_year = BAR_CONFIG[interval]["bars_per_year"]
-    sharpe_ratio = (r.mean() / r.std()) * np.sqrt(bars_per_year)
+    sharpe_ratio = (r.mean() / r.std()) * np.sqrt(bars_per_year) if r.std() > 0 else np.nan
 
     return profit_factor, sharpe_ratio, df[['close', 'signal', 'return', 'strategy_return']]
 
@@ -46,12 +47,21 @@ def optimize_three_sma_strategy(df: pd.DataFrame, interval: str = INTERVAL):
     return best_windows, best_pf
 
 if __name__ == "__main__":
-    df = get_bars("SPY", dt.date(2016, 1, 1), dt.date.today()+dt.timedelta(days=1), source="yfinance", interval=INTERVAL)
+    df = get_bars("SPY", dt.date(2016, 1, 1), dt.date.today()+dt.timedelta(days=1), interval=INTERVAL)
     profit_factor, sharpe_ratio, df_sma = three_sma_strategy(df, interval=INTERVAL)
-    print(f"Profit Factor: {profit_factor:.2f}")
-    print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
 
-    r = df_sma['strategy_return']
+    bars_per_year = BAR_CONFIG[INTERVAL]["bars_per_year"]
+    bh_r = df_sma['return'].dropna()
+    bh_return = np.exp(bh_r.sum()) - 1
+    bh_sharpe = (bh_r.mean() / bh_r.std()) * np.sqrt(bars_per_year)
+
+    r = df_sma['strategy_return'].dropna()
+    strategy_return = np.exp(r.sum()) - 1
+
+    print(f"Buy and Hold Return: {bh_return:.2%}, Sharpe Ratio: {bh_sharpe:.2f}")
+    print(f"Strategy Return: {strategy_return:.2%}, Sharpe Ratio: {sharpe_ratio:.2f}")
+    print(f"Profit Factor: {profit_factor:.2f}")
+
     gross_profit = r[r > 0].sum()
     gross_loss = r[r < 0].abs().sum()
     win_rate = (r > 0).sum() / (r != 0).sum()

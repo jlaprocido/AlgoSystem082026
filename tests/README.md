@@ -8,7 +8,7 @@ Despite the folder name, this isn't a `pytest` unit-test suite — it's where tr
 
 **Monte Carlo Permutation Testing (MCPT)**, done in `bar_permute.py`. `get_permutation()` takes a real OHLC series and generates a randomized-but-statistically-similar fake version of it (it shuffles the relative bar-to-bar moves while preserving the same overall volatility/return characteristics). The `insample_*_mcpt.py` / `walkforward_*_mcpt.py` scripts run a strategy's optimizer against hundreds of these fake permutations and check how often a *random* dataset would have produced a result as good as the real one. That fraction is a pseudo-p-value: **under ~1% is a good sign the edge is real; over ~5% means the "edge" is probably just data-mining bias** (you'd have found an equally good "strategy" on pure noise almost as often).
 
-**Slippage / trading costs**, applied via `src/backtest/costs.py`'s `apply_slippage()`. Alpaca charges 0% commission, but every real trade still crosses the bid-ask spread — `apply_slippage` charges a cost proportional to how much the position size changed (a full flip from long to short costs double a simple entry, since it's really two trades). Not every strategy file has this wired in yet; `mean_reversion.py` does.
+**Slippage / trading costs**, applied via `src/backtest/costs.py`'s `apply_slippage()`. Alpaca charges 0% commission, but every real trade still crosses the bid-ask spread — `apply_slippage` charges a cost proportional to how much the position size changed (a full flip from long to short costs double a simple entry, since it's really two trades). Every strategy file below has this wired in, including their MCPT/walk-forward scripts.
 
 ## Files
 
@@ -19,14 +19,26 @@ Despite the folder name, this isn't a `pytest` unit-test suite — it's where tr
   - `insample_donchian_mcpt.py` — MCPT against the in-sample result, to check if the "best lookback" is a real edge or noise.
   - `walkforward_donchian_mcpt.py` — MCPT against the walk-forward result instead — a stricter, more honest test since walk-forward is already less prone to overfitting than in-sample.
 
-- **`sma/`** — moving-average crossover strategies.
-  - `sma.py` — classic 2-SMA crossover (long when fast MA > slow MA), with an annualized Sharpe ratio (scaled by `BAR_CONFIG`-style bar frequency logic inline) and profit factor.
-  - `3sma.py` — 3-SMA variant: long only when fast > medium > slow are all aligned bullish, flat otherwise.
+- **`sma/`** — 2-SMA crossover (long when fast MA > slow MA), with annualized Sharpe ratio and profit factor.
+  - `sma.py` — `sma_strategy()`, `optimize_sma_strategy()` (in-sample window search). Uses the `INTERVAL`/`BAR_CONFIG` pattern and applies slippage via `apply_slippage()`.
+  - `insample_sma_mcpt.py` — MCPT against the in-sample window-search result.
+
+- **`three_sma/`** — 3-SMA variant: long only when fast > medium > slow are all aligned bullish, flat otherwise.
+  - `three_sma.py` — `three_sma_strategy()`, `optimize_three_sma_strategy()`.
+  - `insample_three_sma_mcpt.py` — MCPT against the in-sample result.
 
 - **`mean_reversion/`** — Bollinger-Band mean reversion (go long when price falls below its own SMA by more than N standard deviations, short when it rises above).
   - `mean_reversion.py` — `mean_reversion()` (signal), `optimize_mean_reversion()` (in-sample z-score search), `walkforward_mean_reversion()` (rolling re-optimization). Uses the `INTERVAL`/`BAR_CONFIG` pattern (see root `README.md`) and applies slippage costs via `apply_slippage()`. The `__main__` block plots buy-and-hold, in-sample, and walk-forward cumulative return together.
   - `insample_mean_reversion_mcpt.py` — MCPT against the in-sample z-score result.
 
+- **`volume_spike/`** — volume-spike momentum: long for the next bar when this bar's volume is an unusual multiple of its own trailing average *and* it closed up — a bet on "unusual participation precedes follow-through," a different signal family from the trend/mean-reversion strategies above.
+  - `volume_spike.py` — `volume_spike_strategy()`, `optimize_volume_spike_strategy()` (grid search over lookback × multiplier, with a `min_trades` floor so the optimizer can't pick a degenerate, near-zero-trade corner of the grid), `walkforward_vs()`.
+  - `insample_volume_spike_mcpt.py` — MCPT against the in-sample result. This is the one strategy where the permutation itself matters: `get_permutation()` shuffles `volume` alongside the intrabar price shuffle (see `bar_permute.py`) so a bar's volume stays paired with its own range, since this strategy reads `df['volume']` directly.
+
+- **`vol_regime/`** — Donchian-style breakout, but only taken when ATR is expanding relative to its own rolling baseline — a regime filter on top of trend-following, on the theory that breakouts in a dead, range-bound market are usually just noise.
+  - `vol_regime.py` — `true_range()`, `vol_regime_strategy()`, `optimize_vol_regime_strategy()`, `walkforward_vol_regime()`.
+  - `insample_vol_regime_mcpt.py` — MCPT against the in-sample result. Uses only OHLC, so the plain (non-volume) permutation is fine here.
+
 ## A note on data ranges
 
-Several `__main__` blocks and MCPT scripts hardcode specific start dates (e.g. `2020, 8, 1` for Alpaca-sourced intraday data, `2016, 1, 1` for yfinance-sourced daily data). These aren't arbitrary — see the "Data Sources" section in the root `README.md` for why: Alpaca's free IEX feed has no history before ~2020-07-27, and yfinance's intraday data is capped at the last 7-8 days (1-minute) or ~60 days (5m/15m/30m/1h) but has deep daily history. Copying a script to test a different date range or interval means checking whether the source (`source="yfinance"` vs `"alpaca"`) still makes sense for that range.
+Several `__main__` blocks and MCPT scripts hardcode specific start dates (e.g. `2020, 8, 1` for intraday intervals, `2016, 1, 1` for daily). These aren't arbitrary — see the "Data Sources" section in the root `README.md`: `get_bars()` picks its source from `interval` alone (daily+ → yfinance, intraday → Alpaca), and Alpaca's free IEX feed has no history before 2020-07-27 — `get_bars` raises immediately if you ask for an earlier intraday start rather than letting it silently truncate. Copying a script to test a different date range means checking that range still clears the 2020-07-27 floor if you're also using (or switching to) an intraday interval.

@@ -9,9 +9,14 @@ from tests.bar_permute import get_permutation
 from src.data.market_data import get_bars
 
 
-df = get_bars("AAPL", dt.date(2020,8,1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval="30m")
+df = get_bars("AAPL", dt.date(2016,1,1), dt.date.today()+dt.timedelta(days=1), interval="30m")
 
-train_df = df[(df['timestamp'].dt.year >= 2020) & (df['timestamp'].dt.year < 2022)]
+# use this symbol's own first ~2 years of data as the in-sample window, rather than a fixed
+# calendar range -- a hardcoded "2020-2022" assumes every symbol has data from 2020 on, which
+# breaks (empty slice, crashes in get_permutation) for any more recent IPO
+train_years = 2
+first_year = int(df['timestamp'].dt.year.min())
+train_df = df[df['timestamp'].dt.year < first_year + train_years]
 best_zscore, best_real_pf = optimize_mean_reversion(train_df, window=5, interval="30m", zscore=1)
 print("In-sample PF", best_real_pf, "Best Z-Score", best_zscore)
 

@@ -9,9 +9,14 @@ from tests.bar_permute import get_permutation
 from src.data.market_data import get_bars
 
 
-df = get_bars("SPY", dt.date(2016, 1, 1), dt.date.today()+dt.timedelta(days=1), source="yfinance", interval=INTERVAL)
+df = get_bars("SPY", dt.date(2016, 1, 1), dt.date.today()+dt.timedelta(days=1), interval=INTERVAL)
 
-train_df = df[(df['timestamp'].dt.year >= 2016) & (df['timestamp'].dt.year < 2020)]
+# use this symbol's own first ~4 years of data as the in-sample window, rather than a fixed
+# calendar range -- a hardcoded "2016-2020" assumes every symbol was already trading by 2016,
+# which breaks (empty slice, crashes in get_permutation) for any more recent IPO
+train_years = 4
+first_year = int(df['timestamp'].dt.year.min())
+train_df = df[df['timestamp'].dt.year < first_year + train_years]
 best_params, best_real_pf = optimize_volume_spike_strategy(train_df, interval=INTERVAL)
 print("In-sample PF", best_real_pf, "Best Params (lookback, multiplier)", best_params)
 

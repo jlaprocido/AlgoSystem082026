@@ -35,6 +35,13 @@ def get_permutation(
     perm_index = start_index + 1
     perm_n = n_bars - perm_index
 
+    if perm_n <= 0:
+        raise ValueError(
+            f"Not enough bars to permute: got {n_bars} bars with start_index={start_index}, need at "
+            f"least {start_index + 2}. A common cause is an empty date-range slice -- e.g. a symbol "
+            f"that didn't start trading until after the training window begins."
+        )
+
     start_bar = np.empty((n_markets, 4))
     start_volume = np.empty(n_markets)
     relative_open = np.empty((n_markets, perm_n))
@@ -118,7 +125,7 @@ if __name__ == '__main__':
     
     import matplotlib.pyplot as plt
     
-    aapl_real = get_bars("AAPL", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval="1d")
+    aapl_real = get_bars("AAPL", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), interval="1d")
     aapl_real = aapl_real[(aapl_real['timestamp'].dt.year >= 2020) & (aapl_real['timestamp'].dt.year < 2023)]
 
     aapl_perm = get_permutation(aapl_real)
@@ -131,7 +138,7 @@ if __name__ == '__main__':
     print(f"Skew. REAL: {aapl_real_r.skew():14.6f} PERM: {aapl_perm_r.skew():14.6f}")
     print(f"Kurt. REAL: {aapl_real_r.kurt():14.6f} PERM: {aapl_perm_r.kurt():14.6f}")
 
-    goog_real = get_bars("GOOG", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval="1d")
+    goog_real = get_bars("GOOG", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), interval="1d")
     goog_real = goog_real[(goog_real['timestamp'].dt.year >= 2020) & (goog_real['timestamp'].dt.year < 2023)]
     goog_real_r = np.log(goog_real['close']).diff()  # type: ignore
 

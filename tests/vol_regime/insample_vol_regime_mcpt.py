@@ -4,7 +4,7 @@ import datetime as dt
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from tests.three_sma.three_sma import optimize_three_sma_strategy, INTERVAL
+from tests.vol_regime.vol_regime import optimize_vol_regime_strategy, INTERVAL
 from tests.bar_permute import get_permutation
 from src.data.market_data import get_bars
 
@@ -17,8 +17,8 @@ df = get_bars("SPY", dt.date(2016, 1, 1), dt.date.today()+dt.timedelta(days=1), 
 train_years = 4
 first_year = int(df['timestamp'].dt.year.min())
 train_df = df[df['timestamp'].dt.year < first_year + train_years]
-best_windows, best_real_pf = optimize_three_sma_strategy(train_df, interval=INTERVAL)
-print("In-sample PF", best_real_pf, "Best Windows (fast, med, slow)", best_windows)
+best_params, best_real_pf = optimize_vol_regime_strategy(train_df, interval=INTERVAL)
+print("In-sample PF", best_real_pf, "Best Params (breakout_lookback, vol_multiplier)", best_params)
 
 
 n_permutations = 200
@@ -27,7 +27,7 @@ permuted_pfs = []
 print("In-Sample MCPT")
 for perm_i in tqdm(range(1, n_permutations)):
     train_perm = get_permutation(train_df)
-    _, best_perm_pf = optimize_three_sma_strategy(train_perm, interval=INTERVAL)  # type: ignore[reportArgumentType]
+    _, best_perm_pf = optimize_vol_regime_strategy(train_perm, interval=INTERVAL)  # type: ignore[reportArgumentType]
 
     if best_perm_pf >= best_real_pf:
         perm_better_count += 1

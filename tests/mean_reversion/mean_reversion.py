@@ -54,7 +54,7 @@ def walkforward_mean_reversion(ohlc: pd.DataFrame, window: int, interval: str,
 
 
 if __name__ == '__main__':
-    df = get_bars("WMT", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval=INTERVAL)
+    df = get_bars("WMT", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), interval=INTERVAL)
 
     best_zscore, best_pf = optimize_mean_reversion(df, window=20, interval=INTERVAL, zscore=1)
     print(f"Best Z-Score: {best_zscore}, Best Profit: {best_pf}")
@@ -63,6 +63,20 @@ if __name__ == '__main__':
 
     df['r'] = np.log(df['close']).diff().shift(-1) # type: ignore[reportAttributeAccessIssue]
     df['mean_reversion_r'] = apply_slippage(signals_df['signal'], df['r'])
+
+    bars_per_year = BAR_CONFIG[INTERVAL]["bars_per_year"]
+    bh_r = df['r'].dropna()
+    bh_return = np.exp(bh_r.sum()) - 1
+    bh_sharpe = (bh_r.mean() / bh_r.std()) * np.sqrt(bars_per_year)
+
+    r = df['mean_reversion_r'].dropna()
+    strategy_return = np.exp(r.sum()) - 1
+    profit_factor = r[r > 0].sum() / r[r < 0].abs().sum()
+    sharpe_ratio = (r.mean() / r.std()) * np.sqrt(bars_per_year)
+
+    print(f"Buy and Hold Return: {bh_return:.2%}, Sharpe Ratio: {bh_sharpe:.2f}")
+    print(f"Strategy Return: {strategy_return:.2%}, Sharpe Ratio: {sharpe_ratio:.2f}")
+    print(f"Profit Factor: {profit_factor:.2f}")
 
     wf_signal = walkforward_mean_reversion(df, window=20, interval=INTERVAL)
     wf_signal = pd.Series(wf_signal, index=df.index)

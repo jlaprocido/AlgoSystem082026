@@ -70,7 +70,7 @@ def walkforward_vs(ohlc: pd.DataFrame, interval: str = INTERVAL,
 
 
 if __name__ == "__main__":
-    df = get_bars("NPKI", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval=INTERVAL)
+    df = get_bars("NPKI", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), interval=INTERVAL)
 
     best_params, best_pf = optimize_volume_spike_strategy(df, interval=INTERVAL)
     best_lookback, best_multiplier = best_params

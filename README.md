@@ -44,43 +44,51 @@ tests/                  # NOTE: this is a strategy research/prototyping area, no
     walkforward_donchian_mcpt.py # permutation test: is the walk-forward result statistically real?
   sma/
     sma.py                 # 2-SMA crossover strategy, with annualized Sharpe ratio and profit factor
-    3sma.py                # 3-SMA variant: long only when fast > med > slow are all aligned
+    insample_sma_mcpt.py         # permutation test for the SMA in-sample result
+  three_sma/
+    three_sma.py                 # 3-SMA variant: long only when fast > med > slow are all aligned
+    insample_three_sma_mcpt.py   # permutation test for the 3-SMA in-sample result
   mean_reversion/
     mean_reversion.py            # Bollinger-Band mean reversion: core strategy, in-sample vs. walk-forward, with slippage modeled
     insample_mean_reversion_mcpt.py  # permutation test for the mean-reversion in-sample result
+  volume_spike/
+    volume_spike.py               # volume-spike momentum: long after an unusually large, up-close volume bar
+    insample_volume_spike_mcpt.py # permutation test for the volume-spike in-sample result (volume-aware permutation)
+  vol_regime/
+    vol_regime.py                 # Donchian breakout gated to only fire when ATR is expanding vs. its own baseline
+    insample_vol_regime_mcpt.py   # permutation test for the vol-regime in-sample result
 ```
 
 See `tests/README.md` for more detail on the strategy research area and what Monte Carlo permutation testing (MCPT) is actually checking for.
 
 ## Data Sources: yfinance vs. Alpaca
 
-`get_bars(symbol, start, end, source="yfinance"|"alpaca", interval=...)` in `src/data/market_data.py` is the single entry point for both data sources — it always returns the same shape (`timestamp`, `symbol`, `open`, `high`, `low`, `close`, `volume`), so strategy code never needs to know which source it's using. Choosing the right source matters a lot, though, because the two have very different limitations:
+`get_bars(symbol, start, end, interval=...)` in `src/data/market_data.py` is the single entry point for both data sources — it always returns the same shape (`timestamp`, `symbol`, `open`, `high`, `low`, `close`, `volume`), so strategy code never needs to know which source it's using, and **doesn't choose one**: the source is derived entirely from `interval`. Daily bars and coarser (`"1d"`, `"1wk"`, `"1mo"`) always come from yfinance; intraday bars (`"1m"`, `"5m"`, `"15m"`, `"30m"`, `"1h"`) always come from Alpaca. This mapping exists because the two sources have very different limitations:
 
-### yfinance (`source="yfinance"`)
+### yfinance (used for `"1d"` and coarser)
 - **No API key needed** — zero setup, works immediately.
-- **Daily/weekly/monthly bars (`interval="1d"`, etc.)**: full history, often going back decades. This is its main strength.
-- **1-minute bars (`interval="1m"`)**: Yahoo only serves roughly the **last 7-8 days**. Request anything older and you'll get an empty or truncated result — not a bug, a hard limit on their end.
-- **Other intraday intervals (`"5m"`, `"15m"`, `"30m"`, `"1h"`, etc.)**: Yahoo allows a longer window than 1-minute, but still only roughly the **last 60 days**. Same failure mode if you go further back.
+- **Daily/weekly/monthly bars**: full history, often going back decades. This is its main strength.
+- Intraday bars are deliberately never requested from yfinance here — Yahoo only serves roughly the **last 7-8 days** for 1-minute bars and **~60 days** for 5m/15m/30m/1h, which isn't enough history for the walk-forward/MCPT testing this project does. Routing all intraday requests to Alpaca instead avoids that limitation entirely.
 - Prices come back split/dividend-adjusted (`auto_adjust=True`).
 - Read-only — there's no way to place trades through yfinance. It's a data source only.
 
-### Alpaca (`source="alpaca"`)
+### Alpaca (used for all intraday intervals)
 - **Requires an API key/secret** (see Setup above) — free tier is enough for this project's data needs.
-- Historical data here is pulled from the **IEX feed** (`feed='iex'` in `get_alpaca_bars`), which is free but has its own limitation: **no historical coverage before roughly 2020-07-27**, regardless of the interval you ask for. Requesting daily bars from 2016 on Alpaca will come back empty — this isn't a bug, it's the feed's actual data horizon (confirmed by testing: minute-bar requests going back to 2018/2020-01 silently start returning data only from 2020-07-27 onward).
-- Once you're inside that window, though, **intraday granularity is available across the full multi-year range** — 1-minute, 5-minute, 15-minute, 30-minute, hourly, all with years of history, not just a few days/months like yfinance.
+- Historical data here is pulled from the **IEX feed** (`feed='iex'` in `get_alpaca_bars`), which is free but has its own limitation: **no historical coverage before 2020-07-27**. Without a guard, requesting an earlier start date wouldn't fail — it would silently come back with bars starting at 2020-07-27 instead of your actual requested range (confirmed by testing: minute-bar requests going back to 2018/2020-01 silently truncate). `get_bars` raises a `ValueError` instead of allowing that silent truncation — see "Guardrails" below.
+- Once you're inside that window, **intraday granularity is available across the full multi-year range** — 1-minute, 5-minute, 15-minute, 30-minute, hourly, all with years of history, not just a few days/months like yfinance.
 - `adjustment='all'` is used, so both stock splits and dividends are adjusted for — important since a live stock split (e.g. AAPL's 4-for-1 split on 2020-08-31) would otherwise show up as a fake ~75% price crash in the raw series.
 - Alpaca is also the only source that matters for **live/paper trading** later — `src/trading/` will eventually place real orders through the same Alpaca account this data comes from.
 
-### When to use which
+### Guardrails
 
-| Situation | Use |
+`get_bars` raises `ValueError` up front — before ever hitting the network — instead of letting either source's limitation silently corrupt a backtest:
+
+| Situation | What happens |
 |---|---|
-| Daily-bar backtest that needs history before ~2020 | **yfinance** (`source="yfinance"`) |
-| Any intraday backtest (`1m`/`5m`/`15m`/`30m`/`1h`) needing more than a couple months of history | **Alpaca** (`source="alpaca"`) — but nothing before ~2020-07-27 |
-| Quick daily check, no `.env`/API key set up yet | **yfinance** — zero config |
-| Anything that will eventually connect to live/paper order execution | **Alpaca** — it's the only source backed by a real broker account |
+| Intraday interval (`1m`/`5m`/`15m`/`30m`/`1h`) with `start` before 2020-07-27 | Raises immediately, naming the exact cutoff. Without this, Alpaca would silently start the series at 2020-07-27, and a strategy backtesting "2018-2024" would actually only be testing 2020-2024 with no indication anything was cut. |
+| Alpaca returns zero bars for a valid request (bad symbol, market holiday range, etc.) | `get_alpaca_bars` raises `ValueError` naming the symbol/date range/interval, rather than returning an empty frame that would silently break every rolling calculation downstream. |
 
-If you need years of intraday history *and* it must predate mid-2020, neither free source covers that — you'd need a paid data vendor, which is out of scope for this project.
+If you need years of intraday history *and* it must predate mid-2020, neither free source covers that — you'd need a paid data vendor, which is out of scope for this project. If you need to force a specific source for some other reason, call `get_yfinance_bars` / `get_alpaca_bars` directly instead of `get_bars`.
 
 ## The `INTERVAL` / `BAR_CONFIG` pattern
 

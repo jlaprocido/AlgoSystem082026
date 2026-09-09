@@ -4,6 +4,10 @@ import datetime as dt
 import matplotlib.pyplot as plt
 
 from src.data.market_data import get_bars
+from src.backtest.costs import apply_slippage
+from src.bar_config import BAR_CONFIG
+
+INTERVAL = "1d"  # flip to "1h" (or any other BAR_CONFIG key) to run everything below at a different bar frequency
 
 def donchian_breakout(ohlc: pd.DataFrame, lookback: int):
     # input df is assumed to have a 'close' column
@@ -16,27 +20,34 @@ def donchian_breakout(ohlc: pd.DataFrame, lookback: int):
     return signal
 
 
-def optimize_donchian(ohlc: pd.DataFrame):
+def optimize_donchian(ohlc: pd.DataFrame, min_trades: int = 20):
 
     best_pf = 0
     best_lookback = -1
     r = np.log(ohlc['close']).diff().shift(-1) # type: ignore[reportAttributeAccessIssue]
     for lookback in range(12, 169):
         signal = donchian_breakout(ohlc, lookback)
-        sig_rets = signal * r
-        sig_pf = sig_rets[sig_rets > 0].sum() / sig_rets[sig_rets < 0].abs().sum()
 
+        # skip lookbacks with too few trades to mean anything -- PF on a handful of trades is
+        # noise, and a lookback with zero losing trades gives a 0-division PF (inf/NaN)
+        if (signal.diff().fillna(0) != 0).sum() < min_trades:
+            continue
+
+        sig_rets = apply_slippage(signal, r)
+        gross_loss = sig_rets[sig_rets < 0].abs().sum()
+        if gross_loss == 0:
+            continue
+
+        sig_pf = sig_rets[sig_rets > 0].sum() / gross_loss
         if sig_pf > best_pf:
             best_pf = sig_pf
             best_lookback = lookback
 
     return best_lookback, best_pf
 
-# 252 * 4 = 4 years of daily data, 21 = 1 month of daily data
-# for hourly, 6.5 * 252 * 4 = 4 years of hourly data, 6.5 * 21 = 1 month of hourly data
-# this should change depending on the data frequency, but for now, we will assume daily data
-
-def walkforward_donch(ohlc: pd.DataFrame, train_lookback: int = 252 * 4, train_step: int = 21):
+def walkforward_donch(ohlc: pd.DataFrame,
+                       train_lookback: int = BAR_CONFIG[INTERVAL]["train_lookback"],
+                       train_step: int = BAR_CONFIG[INTERVAL]["train_step"]):
 
     n = len(ohlc)
     wf_signal = np.full(n, np.nan)
@@ -56,16 +67,29 @@ def walkforward_donch(ohlc: pd.DataFrame, train_lookback: int = 252 * 4, train_s
 
 if __name__ == '__main__':
 
-    df = get_bars("APLD", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval="1d")
+    df = get_bars("APLD", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), interval=INTERVAL)
 
     best_lookback, best_real_pf = optimize_donchian(df)
+    print(f"Best lookback: {best_lookback}, Best PF: {best_real_pf:.2f}")
 
-    print(f"Best lookback: {best_lookback}, Best PF: {best_real_pf}")
-    
-    signal = donchian_breakout(df, best_lookback) 
+    signal = donchian_breakout(df, best_lookback)
 
     df['r'] = np.log(df['close']).diff().shift(-1) # type: ignore[reportAttributeAccessIssue]
-    df['donch_r'] = df['r'] * signal
+    df['donch_r'] = apply_slippage(signal, df['r'])
+
+    bars_per_year = BAR_CONFIG[INTERVAL]["bars_per_year"]
+    bh_r = df['r'].dropna()
+    bh_return = np.exp(bh_r.sum()) - 1
+    bh_sharpe = (bh_r.mean() / bh_r.std()) * np.sqrt(bars_per_year)
+
+    r = df['donch_r'].dropna()
+    strategy_return = np.exp(r.sum()) - 1
+    profit_factor = r[r > 0].sum() / r[r < 0].abs().sum()
+    sharpe_ratio = (r.mean() / r.std()) * np.sqrt(bars_per_year)
+
+    print(f"Buy and Hold Return: {bh_return:.2%}, Sharpe Ratio: {bh_sharpe:.2f}")
+    print(f"Strategy Return: {strategy_return:.2%}, Sharpe Ratio: {sharpe_ratio:.2f}")
+    print(f"Profit Factor: {profit_factor:.2f}")
 
     plt.style.use("dark_background")
     df['donch_r'].cumsum().plot(color='red', label='In-Sample')
@@ -73,12 +97,12 @@ if __name__ == '__main__':
     plt.ylabel('Cumulative Log Return')
 
 
-    wf_signal = walkforward_donch(df, train_lookback=252 * 4, train_step=21)
+    wf_signal = walkforward_donch(df)
 
-    df['r'] = np.log(df['close']).diff().shift(-1)  # type: ignore
-    df['wf_r'] = df['r'] * wf_signal
-    wf_pf = df['wf_r'][df['wf_r'] > 0].sum() / df['wf_r'][df['wf_r'] < 0].abs().sum()
-    print(f"Walk-Forward PF: {wf_pf}")
+    df['wf_r'] = apply_slippage(pd.Series(wf_signal, index=df.index), df['r'])
+    wf_r = df['wf_r'].dropna()
+    wf_pf = wf_r[wf_r > 0].sum() / wf_r[wf_r < 0].abs().sum()
+    print(f"Walk-Forward PF: {wf_pf:.2f}")
 
     plt.style.use("dark_background")
     df['wf_r'].cumsum().plot(color='cyan', label='Walk-Forward')

@@ -23,6 +23,11 @@ from src.config import get_alpaca_client
 STANDARD_COLUMNS = ["open", "high", "low", "close", "volume"]
 PRICE_COLS = ["open", "high", "low", "close"]
 
+# yfinance only serves a few days/months of intraday history, so anything intraday goes to
+# Alpaca instead, which has years of intraday coverage -- just not before its IEX feed starts.
+INTRADAY_INTERVALS = {"1m", "5m", "15m", "30m", "1h"}
+ALPACA_IEX_START = dt.date(2020, 7, 27)
+
 
 def get_yfinance_bars(symbol: str, start: dt.date, end: dt.date, interval: str = "1d") -> pd.DataFrame:
     raw = yf.download(symbol, start=start, end=end, interval=interval, auto_adjust=True)
@@ -62,21 +67,34 @@ def get_alpaca_bars(client: StockHistoricalDataClient, symbol: str,
     return df[["timestamp", "symbol", *STANDARD_COLUMNS]]
 
 
-def get_bars(symbol: str, start: dt.date, end: dt.date, source: str="yfinance", interval: str = "1d") -> pd.DataFrame:
-    if source == "yfinance":
+def get_bars(symbol: str, start: dt.date, end: dt.date, interval: str = "1d") -> pd.DataFrame:
+    # source is derived from interval, not chosen by the caller -- see the "Data Sources"
+    # section of the root README for why intraday and daily+ data need different sources
+    if interval not in INTRADAY_INTERVALS:
         return get_yfinance_bars(symbol, start, end, interval)
-    elif source == "alpaca":
-        client = get_alpaca_client()
-        return get_alpaca_bars(client, symbol, start, end, interval)
-    else:
-        raise ValueError(f"Unknown source: {source}")
+
+    if start < ALPACA_IEX_START:
+        raise ValueError(
+            f"Alpaca's IEX feed (used for intraday data) has no history before {ALPACA_IEX_START}, "
+            f"but start={start} was requested for interval={interval}. Without this check, Alpaca "
+            f"would silently return bars only from {ALPACA_IEX_START} onward instead of your full "
+            f"requested range. Either move start on/after {ALPACA_IEX_START}, or use a daily+ "
+            f"interval (e.g. '1d') to pull deeper history from yfinance instead."
+        )
+
+    client = get_alpaca_client()
+    return get_alpaca_bars(client, symbol, start, end, interval)
 
 
 if __name__ == "__main__":
-    df = get_bars("AAPL", dt.date(2026, 8, 10), dt.date.today()+dt.timedelta(days=1), source="yfinance", interval="1d") 
+    df = get_bars("AAPL", dt.date(2026, 8, 10), dt.date.today()+dt.timedelta(days=1), interval="1d")
     print(df)
-    df = get_bars("AAPL", dt.date(2020, 1, 1), dt.date.today()+dt.timedelta(days=1), source="alpaca", interval="1m") 
+    df = get_bars("AAPL", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), interval="1m")
     print(df)
 
-    # yfinance restricts intrraday data to the last 30 days, so we use Alpaca for intraday data
-    # Alpaca data only goes back to 2020-03-01, so we use yfinance for daily data before that date
+    # requesting intraday data from before Alpaca's IEX horizon now fails loudly instead of
+    # silently coming back truncated to start at 2020-07-27
+    try:
+        get_bars("AAPL", dt.date(2018, 1, 1), dt.date.today()+dt.timedelta(days=1), interval="1m")
+    except ValueError as e:
+        print(f"Expected failure: {e}")
