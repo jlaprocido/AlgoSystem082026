@@ -68,12 +68,9 @@ def get_alpaca_bars(client: StockHistoricalDataClient, symbol: str,
 
 
 def get_bars(symbol: str, start: dt.date, end: dt.date, interval: str = "1d") -> pd.DataFrame:
-    # source is derived from interval, not chosen by the caller -- see the "Data Sources"
-    # section of the root README for why intraday and daily+ data need different sources
-    if interval not in INTRADAY_INTERVALS:
-        return get_yfinance_bars(symbol, start, end, interval)
-
-    if start < ALPACA_IEX_START:
+    # source is derived from interval and date range, not chosen by the caller -- see the
+    # "Data Sources" section of the root README for the full rationale
+    if interval in INTRADAY_INTERVALS and start < ALPACA_IEX_START:
         raise ValueError(
             f"Alpaca's IEX feed (used for intraday data) has no history before {ALPACA_IEX_START}, "
             f"but start={start} was requested for interval={interval}. Without this check, Alpaca "
@@ -82,11 +79,20 @@ def get_bars(symbol: str, start: dt.date, end: dt.date, interval: str = "1d") ->
             f"interval (e.g. '1d') to pull deeper history from yfinance instead."
         )
 
-    client = get_alpaca_client()
-    return get_alpaca_bars(client, symbol, start, end, interval)
+    # once the whole requested range is inside Alpaca's IEX coverage window, prefer it over
+    # yfinance even for daily+ bars -- avoids yfinance's occasional cloud-datacenter-IP rate
+    # limiting, which matters once this runs unattended on a server instead of a home connection.
+    # requests needing history from before the IEX horizon still have to go to yfinance, since
+    # Alpaca simply doesn't have that data at any interval
+    if start >= ALPACA_IEX_START:
+        client = get_alpaca_client()
+        return get_alpaca_bars(client, symbol, start, end, interval)
+
+    return get_yfinance_bars(symbol, start, end, interval)
 
 
 if __name__ == "__main__":
+    # start is well after ALPACA_IEX_START, so this daily request routes to Alpaca, not yfinance
     df = get_bars("AAPL", dt.date(2026, 8, 10), dt.date.today()+dt.timedelta(days=1), interval="1d")
     print(df)
     df = get_bars("AAPL", dt.date(2020, 8, 1), dt.date.today()+dt.timedelta(days=1), interval="1m")

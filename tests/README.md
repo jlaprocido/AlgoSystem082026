@@ -20,8 +20,9 @@ Despite the folder name, this isn't a `pytest` unit-test suite — it's where tr
   - `walkforward_donchian_mcpt.py` — MCPT against the walk-forward result instead — a stricter, more honest test since walk-forward is already less prone to overfitting than in-sample.
 
 - **`sma/`** — 2-SMA crossover (long when fast MA > slow MA), with annualized Sharpe ratio and profit factor.
-  - `sma.py` — `sma_strategy()`, `optimize_sma_strategy()` (in-sample window search). Uses the `INTERVAL`/`BAR_CONFIG` pattern and applies slippage via `apply_slippage()`.
+  - `sma.py` — `sma_strategy()`, `optimize_sma_strategy()` (in-sample window search), `walkforward_sma()` (rolling re-optimization). Uses the `INTERVAL`/`BAR_CONFIG` pattern and applies slippage via `apply_slippage()`.
   - `insample_sma_mcpt.py` — MCPT against the in-sample window-search result.
+  - `walkforward_sma_mcpt.py` — MCPT against the walk-forward result. Note the data slice pulled here is *twice* `BAR_CONFIG`'s `train_lookback` (8 years, not 4) — the training window alone would otherwise consume the entire slice, leaving nothing to actually walk forward across.
 
 - **`three_sma/`** — 3-SMA variant: long only when fast > medium > slow are all aligned bullish, flat otherwise.
   - `three_sma.py` — `three_sma_strategy()`, `optimize_three_sma_strategy()`.
@@ -41,4 +42,4 @@ Despite the folder name, this isn't a `pytest` unit-test suite — it's where tr
 
 ## A note on data ranges
 
-Several `__main__` blocks and MCPT scripts hardcode specific start dates (e.g. `2020, 8, 1` for intraday intervals, `2016, 1, 1` for daily). These aren't arbitrary — see the "Data Sources" section in the root `README.md`: `get_bars()` picks its source from `interval` alone (daily+ → yfinance, intraday → Alpaca), and Alpaca's free IEX feed has no history before 2020-07-27 — `get_bars` raises immediately if you ask for an earlier intraday start rather than letting it silently truncate. Copying a script to test a different date range means checking that range still clears the 2020-07-27 floor if you're also using (or switching to) an intraday interval.
+Several `__main__` blocks and MCPT scripts hardcode specific start dates (e.g. `2020, 8, 1` for intraday intervals, `2016, 1, 1` for daily). These aren't arbitrary — see the "Data Sources" section in the root `README.md`: `get_bars()` picks its source from `interval` *and* `start` together — Alpaca whenever the whole requested range is on/after 2020-07-27 (any interval), yfinance otherwise (needed for daily+ history predating that). Alpaca's free IEX feed has no history before 2020-07-27 at all, so `get_bars` raises immediately if you ask for an earlier *intraday* start rather than letting it silently truncate (daily+ requests before that date just route to yfinance instead, no guard needed). Copying a script to test a different date range mainly matters for intraday intervals: that start still needs to clear the 2020-07-27 floor.
