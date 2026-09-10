@@ -1,0 +1,70 @@
+import datetime as dt
+
+from src.config import get_alpaca_client, get_alpaca_trading_client
+from src.data.market_data import get_bars
+from src.risk import risk_manager as rm
+from src.strategy import aapl_sma
+from src.trading import executor
+
+MAX_DRAWDOWN_PCT = 0.15  # from peak account equity -- breach requires manual risk_manager.clear_halt()
+MAX_DAILY_LOSS_PCT = 0.05  # from yesterday's close -- self-clears the next trading day
+STRATEGY_NAME = "sma"
+
+
+def run() -> None:
+    trading_client = get_alpaca_trading_client()
+    data_client = get_alpaca_client()
+    symbol = aapl_sma.SYMBOL
+
+    if rm.is_halted():
+        print("Halted (max drawdown previously breached) -- run risk_manager.clear_halt() after review.")
+        return
+
+    if not rm.check_market_open(trading_client):
+        print("Market is closed -- nothing to do.")
+        return
+
+    dd_breached, drawdown_pct = rm.check_max_drawdown(trading_client, MAX_DRAWDOWN_PCT)
+    if dd_breached:
+        print(f"Max drawdown breached ({drawdown_pct:.2%} >= {MAX_DRAWDOWN_PCT:.2%}) -- flattening and halting.")
+        rm.flatten_position(trading_client, symbol)
+        rm.set_halted(f"Max drawdown {drawdown_pct:.2%} breached limit {MAX_DRAWDOWN_PCT:.2%}")
+        return
+
+    loss_breached, daily_pnl_pct = rm.check_daily_loss(trading_client, MAX_DAILY_LOSS_PCT)
+    if loss_breached:
+        print(f"Daily loss limit breached ({daily_pnl_pct:.2%} <= -{MAX_DAILY_LOSS_PCT:.2%}) -- flattening for today only.")
+        rm.flatten_position(trading_client, symbol)
+        return
+
+    df = get_bars(symbol, dt.date.today() - dt.timedelta(days=365), dt.date.today() + dt.timedelta(days=1), interval="1d")
+
+    # yfinance can hand back a placeholder row for the current day (volume present, OHLC all
+    # NaN) before the day's data has actually posted -- silently computing a signal on that
+    # would default to a flat/wrong position without any indication anything was off
+    df = df.dropna(subset=["close"])
+    latest_bar_age_days = (dt.date.today() - df['timestamp'].iloc[-1].date()).days
+    if latest_bar_age_days > 4:  # a long weekend/holiday is the normal worst case
+        raise ValueError(
+            f"Latest usable {symbol} bar is from {df['timestamp'].iloc[-1].date()}, "
+            f"{latest_bar_age_days} days old -- data looks stale, refusing to trade on it."
+        )
+
+    signal = aapl_sma.compute_signal(df)
+
+    target_shares = executor.get_target_shares(trading_client, data_client, symbol, signal, aapl_sma.TARGET_ALLOCATION_PCT)
+    current_shares = executor.get_current_shares(trading_client, symbol)
+
+    order = executor.submit_rebalance_order(
+        trading_client, data_client, symbol, STRATEGY_NAME, signal, target_shares, current_shares
+    )
+
+    if order is not None:
+        order = executor.reconcile_fill(trading_client, order.id)
+
+    executor.log_trade(order, symbol, STRATEGY_NAME, signal)
+    print(f"Signal={signal}, current={current_shares}, target={target_shares}, order={'none' if order is None else order.status.value}")
+
+
+if __name__ == "__main__":
+    run()

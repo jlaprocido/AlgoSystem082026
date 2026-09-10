@@ -23,18 +23,34 @@ Extra
 
 ```
 src/
-  config.py           # loads .env, builds the shared Alpaca client (get_alpaca_client)
+  config.py           # loads .env, builds the shared Alpaca clients (get_alpaca_client for data,
+                       # get_alpaca_trading_client for orders) and the ALPACA_PAPER paper/live flag
   bar_config.py        # BAR_CONFIG: per-interval constants (annualization, walk-forward retrain cadence)
   data/
     market_data.py      # get_bars(): unified yfinance/Alpaca data fetcher, same output shape either way
   backtest/
     costs.py            # apply_slippage(): shared trading-cost model, used by every strategy backtest
-  strategy/             # (empty for now — reserved for the "live" version of a chosen strategy)
-  trading/              # (empty for now — reserved for order placement against Alpaca)
-  risk/                 # (empty for now — reserved for the risk gate: max loss/drawdown checks)
-  dashboard/            # (empty for now — reserved for the results dashboard)
+  strategy/
+    aapl_sma.py            # the live, chosen version of tests/sma/sma.py's crossover for AAPL --
+                            # given today's bars, what's today's position? (no backtest/optimizer code)
+  trading/
+    executor.py            # order sizing, marketable-limit submission (with client_order_id
+                            # idempotency), fill reconciliation, and CSV trade logging
+    run_daily.py            # entrypoint: risk checks -> compute signal -> rebalance -> log.
+                            # meant to run once per trading day (scheduling is external -- cron /
+                            # Task Scheduler / the `schedule` skill, not built into this repo)
+  risk/
+    risk_manager.py         # market-hours check, max-drawdown kill switch (persisted halt requiring
+                             # manual risk_manager.clear_halt()), daily loss limit (self-clearing),
+                             # flatten_position()
+  dashboard/            # (empty for now — reserved for the results dashboard; data/orders/trade_log.csv
+                        # is written in a shape meant to be read from here)
   notifications/        # (empty for now — reserved for daily result alerts)
   utils/                # (empty for now)
+
+data/
+  orders/trade_log.csv  # append-only log of every rebalance order run_daily.py submits (git-ignored)
+  risk/halt_state.json  # present only when the max-drawdown kill switch has tripped (git-ignored)
 
 tests/                  # NOTE: this is a strategy research/prototyping area, not pytest unit tests
   bar_permute.py         # Monte Carlo permutation testing utility shared by every strategy below

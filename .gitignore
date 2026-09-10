@@ -65,10 +65,12 @@ logs/
 *.log
 data/cache/
 data/backtest_results/
+data/risk/*.json  # halt_state.json -- runtime kill-switch state, not something to commit
 *.csv  # Optional: exclude CSV files if you prefer not to commit order history
 !data/orders/.gitkeep
 !data/backtest_results/.gitkeep
 !data/cache/.gitkeep
+!data/risk/.gitkeep
 
 # ============================================================================
 # SYSTEM FILES

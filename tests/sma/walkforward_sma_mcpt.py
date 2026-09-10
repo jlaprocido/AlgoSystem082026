@@ -31,7 +31,7 @@ sma_rets = apply_slippage(df['sma_wf_signal'], df['r'])
 real_gross_loss = sma_rets[sma_rets < 0].abs().sum()
 real_wf_pf = sma_rets[sma_rets > 0].sum() / real_gross_loss if real_gross_loss > 0 else np.nan
 
-n_permutations = 200
+n_permutations = 1000
 perm_better_count = 1
 permuted_pfs = []
 print("Walkforward MCPT")
