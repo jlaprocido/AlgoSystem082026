@@ -101,7 +101,7 @@ def reconcile_fill(trading_client: TradingClient, order_id, timeout_s: int = 60)
     return order  # type: ignore[reportReturnType]
 
 
-def log_trade(order: Order | None, symbol: str, strategy: str, signal: int, note: str = "no_rebalance_needed") -> None:
+def log_trade(order: Order | None, symbol: str, strategy: str, signal: int | None, note: str = "no_rebalance_needed") -> None:
     TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     write_header = not TRADE_LOG_PATH.exists()
 

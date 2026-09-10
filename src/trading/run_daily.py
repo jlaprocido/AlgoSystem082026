@@ -18,10 +18,12 @@ def run() -> None:
 
     if rm.is_halted():
         print("Halted (max drawdown previously breached) -- run risk_manager.clear_halt() after review.")
+        executor.log_trade(None, symbol, STRATEGY_NAME, None, note="halted")
         return
 
     if not rm.check_market_open(trading_client):
         print("Market is closed -- nothing to do.")
+        executor.log_trade(None, symbol, STRATEGY_NAME, None, note="market_closed")
         return
 
     dd_breached, drawdown_pct = rm.check_max_drawdown(trading_client, MAX_DRAWDOWN_PCT)
@@ -29,12 +31,14 @@ def run() -> None:
         print(f"Max drawdown breached ({drawdown_pct:.2%} >= {MAX_DRAWDOWN_PCT:.2%}) -- flattening and halting.")
         rm.flatten_position(trading_client, symbol)
         rm.set_halted(f"Max drawdown {drawdown_pct:.2%} breached limit {MAX_DRAWDOWN_PCT:.2%}")
+        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"max_drawdown_breach_{drawdown_pct:.2%}")
         return
 
     loss_breached, daily_pnl_pct = rm.check_daily_loss(trading_client, MAX_DAILY_LOSS_PCT)
     if loss_breached:
         print(f"Daily loss limit breached ({daily_pnl_pct:.2%} <= -{MAX_DAILY_LOSS_PCT:.2%}) -- flattening for today only.")
         rm.flatten_position(trading_client, symbol)
+        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_breach_{daily_pnl_pct:.2%}")
         return
 
     df = get_bars(symbol, dt.date.today() - dt.timedelta(days=365), dt.date.today() + dt.timedelta(days=1), interval="1d")
