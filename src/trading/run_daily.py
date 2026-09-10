@@ -2,6 +2,7 @@ import datetime as dt
 
 from src.config import get_alpaca_client, get_alpaca_trading_client
 from src.data.market_data import get_bars
+from src.notifications import notifier
 from src.risk import risk_manager as rm
 from src.strategy import aapl_sma
 from src.trading import executor
@@ -9,6 +10,15 @@ from src.trading import executor
 MAX_DRAWDOWN_PCT = 0.15  # from peak account equity -- breach requires manual risk_manager.clear_halt()
 MAX_DAILY_LOSS_PCT = 0.05  # from yesterday's close -- self-clears the next trading day
 STRATEGY_NAME = "sma"
+
+
+def notify(message: str) -> None:
+    # a notification failure (missing config, SMTP hiccup, etc.) must never take down or
+    # interrupt the actual trading/risk logic -- this is always the last, best-effort step
+    try:
+        notifier.send_sms(message)
+    except Exception as e:
+        print(f"Notification failed (non-fatal): {e}")
 
 
 def run() -> None:
@@ -19,11 +29,13 @@ def run() -> None:
     if rm.is_halted():
         print("Halted (max drawdown previously breached) -- run risk_manager.clear_halt() after review.")
         executor.log_trade(None, symbol, STRATEGY_NAME, None, note="halted")
+        notify(f"{symbol} bot: still halted from a prior max-drawdown breach. Needs manual review/clear_halt().")
         return
 
     if not rm.check_market_open(trading_client):
         print("Market is closed -- nothing to do.")
         executor.log_trade(None, symbol, STRATEGY_NAME, None, note="market_closed")
+        notify(f"{symbol} bot: ran while market was closed, nothing to do.")
         return
 
     dd_breached, drawdown_pct = rm.check_max_drawdown(trading_client, MAX_DRAWDOWN_PCT)
@@ -32,6 +44,7 @@ def run() -> None:
         rm.flatten_position(trading_client, symbol)
         rm.set_halted(f"Max drawdown {drawdown_pct:.2%} breached limit {MAX_DRAWDOWN_PCT:.2%}")
         executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"max_drawdown_breach_{drawdown_pct:.2%}")
+        notify(f"{symbol} bot: MAX DRAWDOWN BREACH ({drawdown_pct:.2%}) -- position flattened, bot halted until manually cleared.")
         return
 
     loss_breached, daily_pnl_pct = rm.check_daily_loss(trading_client, MAX_DAILY_LOSS_PCT)
@@ -39,6 +52,7 @@ def run() -> None:
         print(f"Daily loss limit breached ({daily_pnl_pct:.2%} <= -{MAX_DAILY_LOSS_PCT:.2%}) -- flattening for today only.")
         rm.flatten_position(trading_client, symbol)
         executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_breach_{daily_pnl_pct:.2%}")
+        notify(f"{symbol} bot: daily loss limit breached ({daily_pnl_pct:.2%}) -- position flattened for today, resumes next trading day.")
         return
 
     df = get_bars(symbol, dt.date.today() - dt.timedelta(days=365), dt.date.today() + dt.timedelta(days=1), interval="1d")
@@ -74,6 +88,11 @@ def run() -> None:
 
     if order is not None:
         order = executor.reconcile_fill(trading_client, order.id)
+        side = order.side.value.upper()  # type: ignore[reportAttributeAccessIssue]
+        notify(
+            f"{symbol} bot: {side} {order.qty} shares, status={order.status.value}, "  # type: ignore[reportAttributeAccessIssue]
+            f"avg_price={order.filled_avg_price or order.limit_price}"  # type: ignore[reportAttributeAccessIssue]
+        )
 
     executor.log_trade(order, symbol, STRATEGY_NAME, signal)
     print(f"Signal={signal}, current={current_shares}, target={target_shares}, order={'none' if order is None else order.status.value}")

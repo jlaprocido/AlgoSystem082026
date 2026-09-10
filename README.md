@@ -36,16 +36,21 @@ src/
   trading/
     executor.py            # order sizing, marketable-limit submission (with client_order_id
                             # idempotency), fill reconciliation, and CSV trade logging
-    run_daily.py            # entrypoint: risk checks -> compute signal -> rebalance -> log.
+    run_daily.py            # entrypoint: risk checks -> compute signal -> rebalance -> log -> notify.
                             # meant to run once per trading day (scheduling is external -- cron /
                             # Task Scheduler / the `schedule` skill, not built into this repo)
+    eod_summary.py           # separate entrypoint, meant to run once after market close: sends a
+                             # daily PnL + portfolio-stats notification
   risk/
     risk_manager.py         # market-hours check, max-drawdown kill switch (persisted halt requiring
                              # manual risk_manager.clear_halt()), daily loss limit (self-clearing),
                              # flatten_position()
   dashboard/            # (empty for now — reserved for the results dashboard; data/orders/trade_log.csv
                         # is written in a shape meant to be read from here)
-  notifications/        # (empty for now — reserved for daily result alerts)
+  notifications/
+    notifier.py             # send_sms(): free email-to-SMS gateway (Gmail SMTP -> carrier gateway
+                             # address). Optional -- config is read lazily, so nothing else breaks
+                             # if it's left unconfigured
   utils/                # (empty for now)
 
 data/
