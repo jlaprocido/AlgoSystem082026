@@ -101,7 +101,7 @@ def reconcile_fill(trading_client: TradingClient, order_id, timeout_s: int = 60)
     return order  # type: ignore[reportReturnType]
 
 
-def log_trade(order: Order | None, symbol: str, strategy: str, signal: int) -> None:
+def log_trade(order: Order | None, symbol: str, strategy: str, signal: int, note: str = "no_rebalance_needed") -> None:
     TRADE_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     write_header = not TRADE_LOG_PATH.exists()
 
@@ -115,15 +115,15 @@ def log_trade(order: Order | None, symbol: str, strategy: str, signal: int) -> N
                 "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "symbol": symbol, "strategy": strategy, "signal": signal,
                 "side": "", "qty": 0, "limit_price": "", "client_order_id": "",
-                "status": "no_rebalance_needed", "filled_qty": "", "filled_avg_price": "", "filled_at": "",
+                "status": note, "filled_qty": "", "filled_avg_price": "", "filled_at": "",
             })
             return
 
         writer.writerow({
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
             "symbol": symbol, "strategy": strategy, "signal": signal,
-            "side": order.side.value, "qty": order.qty, "limit_price": order.limit_price,
-            "client_order_id": order.client_order_id, "status": order.status.value,
+            "side": order.side.value, "qty": order.qty, "limit_price": order.limit_price, # type: ignore[reportAttributeAccessIssue]
+            "client_order_id": order.client_order_id, "status": order.status.value, 
             "filled_qty": order.filled_qty, "filled_avg_price": order.filled_avg_price,
             "filled_at": order.filled_at.isoformat() if order.filled_at else "",
         })

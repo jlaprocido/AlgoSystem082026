@@ -51,9 +51,18 @@ def run() -> None:
         )
 
     signal = aapl_sma.compute_signal(df)
+    current_shares = executor.get_current_shares(trading_client, symbol)
+
+    # only trade when the signal actually implies a different position than the one we're
+    # already holding -- recomputing and re-truing-up a target every day (even while flat-to-flat
+    # or long-to-long) would generate small, pointless trades purely from price/equity drift,
+    # which the backtest's slippage model never accounts for (it only charges cost on signal.diff())
+    if bool(signal) == (current_shares > 0):
+        print(f"Signal unchanged ({'long' if signal else 'flat'}) -- holding {current_shares} shares, no trade needed.")
+        executor.log_trade(None, symbol, STRATEGY_NAME, signal, note="signal_unchanged")
+        return
 
     target_shares = executor.get_target_shares(trading_client, data_client, symbol, signal, aapl_sma.TARGET_ALLOCATION_PCT)
-    current_shares = executor.get_current_shares(trading_client, symbol)
 
     order = executor.submit_rebalance_order(
         trading_client, data_client, symbol, STRATEGY_NAME, signal, target_shares, current_shares
