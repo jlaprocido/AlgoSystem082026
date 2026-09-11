@@ -13,10 +13,10 @@ STRATEGY_NAME = "sma"
 
 
 def notify(message: str) -> None:
-    # a notification failure (missing config, SMTP hiccup, etc.) must never take down or
+    # a notification failure (missing config, network hiccup, etc.) must never take down or
     # interrupt the actual trading/risk logic -- this is always the last, best-effort step
     try:
-        notifier.send_sms(message)
+        notifier.send_notification(message)
     except Exception as e:
         print(f"Notification failed (non-fatal): {e}")
 

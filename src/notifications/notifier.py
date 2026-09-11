@@ -1,35 +1,19 @@
-import smtplib
-from email.mime.text import MIMEText
+import requests
 
-from src.config import GMAIL_ADDRESS, GMAIL_APP_PASSWORD, NOTIFY_PHONE_NUMBER, NOTIFY_CARRIER
+from src.config import NTFY_TOPIC
 
-# free email-to-SMS gateways -- reliability/format support varies by carrier and can change
-# without notice; this is fine for a personal low-volume bot, not something to depend on
-# for anything time-critical
-CARRIER_GATEWAYS = {
-    "att": "txt.att.net",
-    "verizon": "vtext.com",
-    "tmobile": "tmomail.net",
-}
+NTFY_URL = "https://ntfy.sh"
 
 
-def send_sms(message: str) -> None:
-    if not (GMAIL_ADDRESS and GMAIL_APP_PASSWORD and NOTIFY_PHONE_NUMBER):
+def send_notification(message: str) -> None:
+    if not NTFY_TOPIC:
         raise ValueError(
-            "Notifications aren't configured -- set GMAIL_ADDRESS, GMAIL_APP_PASSWORD, and "
-            "NOTIFY_PHONE_NUMBER in .env (see .env.example)."
+            "Notifications aren't configured -- set NTFY_TOPIC in .env (see .env.example). "
+            "Pick any topic name (treat it like a shared secret -- anyone who knows it can read "
+            "your notifications) and subscribe to it in the ntfy app (iOS/Android)."
         )
 
-    gateway = CARRIER_GATEWAYS[NOTIFY_CARRIER]
-    to_address = f"{NOTIFY_PHONE_NUMBER}@{gateway}"
-
-    # no Subject line on purpose -- most gateways just prepend it to the body, eating into
-    # the ~160 character SMS budget for no benefit
-    msg = MIMEText(message)
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = to_address
-
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_ADDRESS, [to_address], msg.as_string())
+    # unlike email-to-SMS, this is a plain synchronous HTTP call -- a delivery failure raises
+    # right here, immediately, instead of arriving as a bounce email minutes later
+    response = requests.post(f"{NTFY_URL}/{NTFY_TOPIC}", data=message.encode("utf-8"), timeout=10)
+    response.raise_for_status()

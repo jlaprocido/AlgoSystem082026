@@ -48,8 +48,8 @@ src/
   dashboard/            # (empty for now — reserved for the results dashboard; data/orders/trade_log.csv
                         # is written in a shape meant to be read from here)
   notifications/
-    notifier.py             # send_sms(): free email-to-SMS gateway (Gmail SMTP -> carrier gateway
-                             # address). Optional -- config is read lazily, so nothing else breaks
+    notifier.py             # send_notification(): push via ntfy.sh (plain HTTPS POST, no account
+                             # needed). Optional -- config is read lazily, so nothing else breaks
                              # if it's left unconfigured
   utils/                # (empty for now)
 
@@ -130,7 +130,7 @@ The first strategy graduated from `tests/sma/` into live (currently **paper**) e
 - **Daily loss limit**: flattens for the rest of *that calendar day only*, then clears itself automatically the next trading day — a single bad day is normal variance in a way a large drawdown isn't.
 - **Market-hours check**, so it never trades against stale after-hours quotes.
 
-**Notifications** (`src/notifications/notifier.py`, optional): a free email-to-SMS gateway (Gmail SMTP → your carrier's gateway address, e.g. `@txt.att.net`) fires on every order placed, on each of the four conditions above, and on the end-of-day summary. A notification failure is always non-fatal — it never blocks the actual trading/risk logic (see `run_daily.py`'s `notify()` wrapper).
+**Notifications** (`src/notifications/notifier.py`, optional): a push via [ntfy.sh](https://ntfy.sh) (a plain HTTPS POST to a topic you pick, read via the ntfy app) fires on every order placed, on each of the four conditions above, and on the end-of-day summary. Started as email-to-SMS (Gmail SMTP → a carrier's gateway address), but two different gateways (AT&T's `txt.att.net`, then a third-party alternative) both silently failed to deliver — email relay failures happen *asynchronously* (a bounce email arrives back at the sender, sometimes minutes later), so a script has no way to detect them at send time at all. ntfy's plain synchronous HTTP response fixes that: a delivery failure raises immediately, in the same process, instead of arriving as an email bounce after the script has already exited. A notification failure is always non-fatal either way — it never blocks the actual trading/risk logic (see `run_daily.py`'s `notify()` wrapper).
 
 **Position sizing**: `TARGET_ALLOCATION_PCT` in `src/strategy/aapl_sma.py` (currently `1.0`, i.e. all-in) is a fraction of account equity rather than a fixed dollar/share amount — the same mechanism will support running several strategies off one account later by giving each a smaller slice.
 
