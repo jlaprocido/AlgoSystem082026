@@ -21,6 +21,35 @@ def notify(message: str) -> None:
         print(f"Notification failed (non-fatal): {e}")
 
 
+def check_risk_limits(trading_client, symbol: str) -> bool:
+    """Returns True if trading should proceed. On a breach, flattens the position (and, for a
+    drawdown breach, sets the persistent halt), logs it, notifies, and returns False.
+
+    Shared between run_daily.py (once a day, at open) and intraday_check.py (every 1-2 hours
+    during market hours) -- the latter exists specifically because this cadence is the one
+    thing standing between a leveraged position and an Alpaca-forced margin-call liquidation
+    that our once-a-day check would never see in time to react to.
+    """
+    dd_breached, drawdown_pct = rm.check_max_drawdown(trading_client, MAX_DRAWDOWN_PCT)
+    if dd_breached:
+        print(f"Max drawdown breached ({drawdown_pct:.2%} >= {MAX_DRAWDOWN_PCT:.2%}) -- flattening and halting.")
+        rm.flatten_position(trading_client, symbol)
+        rm.set_halted(f"Max drawdown {drawdown_pct:.2%} breached limit {MAX_DRAWDOWN_PCT:.2%}")
+        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"max_drawdown_breach_{drawdown_pct:.2%}")
+        notify(f"{symbol} bot: MAX DRAWDOWN BREACH ({drawdown_pct:.2%}) -- position flattened, bot halted until manually cleared.")
+        return False
+
+    loss_breached, daily_pnl_pct = rm.check_daily_loss(trading_client, MAX_DAILY_LOSS_PCT)
+    if loss_breached:
+        print(f"Daily loss limit breached ({daily_pnl_pct:.2%} <= -{MAX_DAILY_LOSS_PCT:.2%}) -- flattening for today only.")
+        rm.flatten_position(trading_client, symbol)
+        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_breach_{daily_pnl_pct:.2%}")
+        notify(f"{symbol} bot: daily loss limit breached ({daily_pnl_pct:.2%}) -- position flattened for today, resumes next trading day.")
+        return False
+
+    return True
+
+
 def run() -> None:
     trading_client = get_alpaca_trading_client()
     data_client = get_alpaca_client()
@@ -38,21 +67,7 @@ def run() -> None:
         notify(f"{symbol} bot: ran while market was closed, nothing to do.")
         return
 
-    dd_breached, drawdown_pct = rm.check_max_drawdown(trading_client, MAX_DRAWDOWN_PCT)
-    if dd_breached:
-        print(f"Max drawdown breached ({drawdown_pct:.2%} >= {MAX_DRAWDOWN_PCT:.2%}) -- flattening and halting.")
-        rm.flatten_position(trading_client, symbol)
-        rm.set_halted(f"Max drawdown {drawdown_pct:.2%} breached limit {MAX_DRAWDOWN_PCT:.2%}")
-        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"max_drawdown_breach_{drawdown_pct:.2%}")
-        notify(f"{symbol} bot: MAX DRAWDOWN BREACH ({drawdown_pct:.2%}) -- position flattened, bot halted until manually cleared.")
-        return
-
-    loss_breached, daily_pnl_pct = rm.check_daily_loss(trading_client, MAX_DAILY_LOSS_PCT)
-    if loss_breached:
-        print(f"Daily loss limit breached ({daily_pnl_pct:.2%} <= -{MAX_DAILY_LOSS_PCT:.2%}) -- flattening for today only.")
-        rm.flatten_position(trading_client, symbol)
-        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_breach_{daily_pnl_pct:.2%}")
-        notify(f"{symbol} bot: daily loss limit breached ({daily_pnl_pct:.2%}) -- position flattened for today, resumes next trading day.")
+    if not check_risk_limits(trading_client, symbol):
         return
 
     df = get_bars(symbol, dt.date.today() - dt.timedelta(days=365), dt.date.today() + dt.timedelta(days=1), interval="1d")
@@ -80,7 +95,9 @@ def run() -> None:
         executor.log_trade(None, symbol, STRATEGY_NAME, signal, note="signal_unchanged")
         return
 
-    target_shares = executor.get_target_shares(trading_client, data_client, symbol, signal, aapl_sma.TARGET_ALLOCATION_PCT)
+    target_shares = executor.get_target_shares(
+        trading_client, data_client, symbol, signal, aapl_sma.TARGET_ALLOCATION_PCT, aapl_sma.LEVERAGE_MULTIPLIER
+    )
 
     order = executor.submit_rebalance_order(
         trading_client, data_client, symbol, STRATEGY_NAME, signal, target_shares, current_shares

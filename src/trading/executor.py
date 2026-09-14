@@ -35,7 +35,7 @@ def get_latest_quote(data_client: StockHistoricalDataClient, symbol: str):
 
 
 def get_target_shares(trading_client: TradingClient, data_client: StockHistoricalDataClient,
-                       symbol: str, signal: int, allocation_pct: float) -> int:
+                       symbol: str, signal: int, allocation_pct: float, leverage_multiplier: float = 1.0) -> int:
     if signal == 0:
         return 0
 
@@ -43,9 +43,18 @@ def get_target_shares(trading_client: TradingClient, data_client: StockHistorica
     equity = float(account.equity)  # type: ignore[reportAttributeAccessIssue]
     quote = get_latest_quote(data_client, symbol)
 
+    # leverage_multiplier sizes off total equity times the leverage factor (e.g. 2.0 for 2x
+    # overnight Reg T margin), not off account.buying_power/regt_buying_power directly --
+    # those reflect *remaining* capacity after any existing position, and Alpaca's own
+    # account.multiplier can read 4 even on a small paper account (it simulates a >$25k
+    # pattern-day-trader account regardless of actual equity, which a real live account this
+    # size would not get) -- so this computes the intended target explicitly instead of
+    # trusting either field to already mean what we want
+    target_dollar_exposure = equity * allocation_pct * leverage_multiplier
+
     # whole shares only -- fractional/notional orders are a simplification left for later,
     # since notional orders on Alpaca are restricted to market orders, not the limit orders used here
-    return int((equity * allocation_pct) // quote.ask_price)
+    return int(target_dollar_exposure // quote.ask_price)
 
 
 def get_current_shares(trading_client: TradingClient, symbol: str) -> int:
@@ -53,7 +62,10 @@ def get_current_shares(trading_client: TradingClient, symbol: str) -> int:
         position = trading_client.get_open_position(symbol)
         return int(float(position.qty))  # type: ignore[reportAttributeAccessIssue]
     except APIError as e:
-        if "position does not exist" in str(e).lower():
+        # matched on the same stable numeric code risk_manager.flatten_position() uses --
+        # GET and DELETE /positions/{symbol} return different message text for "no position"
+        # ("position does not exist" vs "position not found: AAPL") but share this code
+        if e.code == 40410000:
             return 0
         raise
 

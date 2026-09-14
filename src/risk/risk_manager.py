@@ -2,8 +2,14 @@ import json
 import datetime as dt
 from pathlib import Path
 
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+NO_POSITION_ERROR_CODE = 40410000  # shared by GET and DELETE /positions/{symbol} despite
+                                    # returning different message text ("position does not
+                                    # exist" vs "position not found: AAPL") -- match on the
+                                    # stable numeric code instead of fragile message wording
 
 HALT_STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "risk" / "halt_state.json"
 
@@ -62,7 +68,7 @@ def clear_halt() -> None:
 def flatten_position(trading_client: TradingClient, symbol: str) -> None:
     try:
         trading_client.close_position(symbol)
-    except Exception as e:
+    except APIError as e:
         # no open position is not an error worth raising over -- there's nothing to flatten
-        if "position does not exist" not in str(e).lower():
+        if e.code != NO_POSITION_ERROR_CODE:
             raise

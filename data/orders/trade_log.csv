@@ -1,3 +1,8 @@
 timestamp,symbol,strategy,signal,side,qty,limit_price,client_order_id,status,filled_qty,filled_avg_price,filled_at
 2026-09-11T13:33:07.596362+00:00,AAPL,sma,1,buy,30,329.51,AAPL-sma-2026-09-11,filled,30,329.148,2026-09-11T13:33:03.738359+00:00
 2026-09-11T13:33:43.388748+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
+2026-09-14T14:33:09.606767+00:00,AAPL,sma,,,0,,,halted,,,
+2026-09-14T14:43:43.996169+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
+2026-09-14T14:44:04.393774+00:00,AAPL,sma,,,0,,,max_drawdown_breach_18.00%,,,
+2026-09-14T14:45:41.384633+00:00,AAPL,sma,,,0,,,daily_loss_breach_-7.00%,,,
+2026-09-14T14:46:49.298434+00:00,AAPL,sma,1,buy,30,333.24,AAPL-sma-2026-09-14,filled,30,332.91,2026-09-14T14:46:47.668251+00:00
