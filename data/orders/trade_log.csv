@@ -9,3 +9,4 @@ timestamp,symbol,strategy,signal,side,qty,limit_price,client_order_id,status,fil
 2026-09-15T01:07:13.468330+00:00,AAPL,sma,,,0,,,market_closed,,,
 2026-09-15T03:19:58.478062+00:00,AAPL,sma,,,0,,,market_closed,,,
 2026-09-15T15:18:51.075568+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
+2026-09-15T17:45:38.765893+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
