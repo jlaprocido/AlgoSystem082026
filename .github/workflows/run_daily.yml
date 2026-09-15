@@ -47,18 +47,41 @@ jobs:
         run: python -m src.trading.run_daily
 
       # runners are ephemeral -- a fresh checkout every run -- so the trade log and any risk
-      # state written this run have to be committed back or they'd silently reset next time
+      # state written this run have to be committed back or they'd silently reset next time.
+      # Three separate workflows (plus a possible local push from you) can all try to push to
+      # main around the same time -- a plain `git push` here failed exactly that way once
+      # already (non-fast-forward rejection). Retries with fetch+rebase in between; a real
+      # conflict (two runs writing the same risk-state file within seconds of each other) or
+      # running out of retries drops this run's state commit rather than failing the job --
+      # the actual trade/notification already happened before this step, so losing the local
+      # persistence of it once is a much smaller problem than a false-red job status.
       - name: Persist trade log / risk state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config merge.union.driver "git merge-file --union %A %O %B"
           git add data/orders/trade_log.csv data/risk/
           if git diff --cached --quiet; then
             echo "No state changes to commit."
-          else
-            git commit -m "Update trade log / risk state [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "Update trade log / risk state [skip ci]"
+
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "Pushed successfully."
+              exit 0
+            fi
+            echo "Push rejected (attempt $i/5) -- another run or a local push landed first. Fetching and rebasing..."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Rebase hit a real conflict -- dropping this run's state commit instead of failing the job."
+              git rebase --abort
+              exit 0
+            fi
+            sleep $((RANDOM % 10 + 1))
+          done
+          echo "Failed to push after 5 attempts -- giving up without failing the job."
 
       - name: Build dashboard
         env:

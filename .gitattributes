@@ -1,0 +1,9 @@
+# data/orders/trade_log.csv is an append-only log that multiple GitHub Actions workflows (and
+# possibly a local push) can all try to commit new rows to around the same time. Standard git
+# merge/rebase treats two commits that each add a new line at the same position (end of a short
+# file) as a genuine conflict, not an auto-mergeable change -- confirmed by direct testing, not
+# assumed. `merge=union` tells git to keep both sides' added lines instead of conflicting,
+# exactly the behavior wanted for a shared append-only log. Requires each workflow to also run
+# `git config merge.union.driver "git merge-file --union %A %O %B"` before rebasing/merging --
+# see the "Persist trade log / risk state" step in .github/workflows/*.yml.
+data/orders/trade_log.csv merge=union

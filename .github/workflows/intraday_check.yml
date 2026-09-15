@@ -50,17 +50,37 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: python -m src.trading.intraday_check
 
+      # concurrency: group "pages" above serializes this against the other two workflows, but
+      # not against a local `git push` from you -- retries with fetch+rebase in between for
+      # that case; a real conflict or running out of retries drops this run's state commit
+      # rather than failing the job (the trade/notification already happened before this step)
       - name: Persist trade log / risk state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config merge.union.driver "git merge-file --union %A %O %B"
           git add data/orders/trade_log.csv data/risk/
           if git diff --cached --quiet; then
             echo "No state changes to commit."
-          else
-            git commit -m "Update trade log / risk state [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "Update trade log / risk state [skip ci]"
+
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "Pushed successfully."
+              exit 0
+            fi
+            echo "Push rejected (attempt $i/5) -- another run or a local push landed first. Fetching and rebasing..."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Rebase hit a real conflict -- dropping this run's state commit instead of failing the job."
+              git rebase --abort
+              exit 0
+            fi
+            sleep $((RANDOM % 10 + 1))
+          done
+          echo "Failed to push after 5 attempts -- giving up without failing the job."
 
       - name: Build dashboard
         env:
