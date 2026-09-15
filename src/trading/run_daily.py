@@ -41,8 +41,13 @@ def check_risk_limits(trading_client, symbol: str) -> bool:
 
     loss_breached, daily_pnl_pct = rm.check_daily_loss(trading_client, MAX_DAILY_LOSS_PCT)
     if loss_breached:
+        if rm.is_daily_loss_handled_today():
+            print(f"Daily loss limit still breached ({daily_pnl_pct:.2%}) -- already flattened/notified today, staying quiet.")
+            return False
+
         print(f"Daily loss limit breached ({daily_pnl_pct:.2%} <= -{MAX_DAILY_LOSS_PCT:.2%}) -- flattening for today only.")
         rm.flatten_position(trading_client, symbol)
+        rm.mark_daily_loss_handled_today()
         executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_breach_{daily_pnl_pct:.2%}")
         notify(f"{symbol} bot: daily loss limit breached ({daily_pnl_pct:.2%}) -- position flattened for today, resumes next trading day.")
         return False

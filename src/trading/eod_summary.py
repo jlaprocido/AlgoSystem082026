@@ -1,3 +1,7 @@
+import datetime as dt
+import json
+from pathlib import Path
+
 from src.config import get_alpaca_trading_client
 from src.risk import risk_manager as rm
 from src.strategy import aapl_sma
@@ -6,8 +10,29 @@ from src.trading.run_daily import notify
 
 # separate entrypoint from run_daily.py -- meant to run once after market close, not at open
 
+STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "risk" / "eod_summary_state.json"
+
+
+def _already_sent_today() -> bool:
+    if not STATE_PATH.exists():
+        return False
+    return json.loads(STATE_PATH.read_text()).get("last_sent_date") == dt.date.today().isoformat()
+
+
+def _mark_sent_today() -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(json.dumps({"last_sent_date": dt.date.today().isoformat()}))
+
 
 def run() -> None:
+    # GitHub Actions cron can't express "4pm US/Eastern" directly (schedule: is UTC-only, and
+    # ET flips between UTC-4/UTC-5 across DST) -- the workflow schedules this at both UTC
+    # equivalents to stay correct year-round, which means it can fire twice on the same day.
+    # This guard makes the second firing a silent no-op instead of a duplicate notification.
+    if _already_sent_today():
+        print("EOD summary already sent today -- skipping.")
+        return
+
     trading_client = get_alpaca_trading_client()
     symbol = aapl_sma.SYMBOL
 
@@ -28,6 +53,7 @@ def run() -> None:
     )
     print(message)
     notify(message)
+    _mark_sent_today()
 
 
 if __name__ == "__main__":

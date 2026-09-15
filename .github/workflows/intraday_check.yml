@@ -1,0 +1,54 @@
+name: Intraday Risk Check
+
+# Runs roughly hourly, 14:15-20:15 UTC, Mon-Fri -- covers 10:15am-4:15pm EDT and 9:15am-3:15pm
+# EST without needing DST-aware scheduling (see run_daily.yml for the general reasoning); the
+# extra checks that land before/after actual market hours in either DST state just hit
+# intraday_check.py's own market-closed early exit, a harmless no-op. Minute :15 (not :00) is
+# deliberate -- GitHub documents the top of the hour as the most congested/delayed time for
+# scheduled workflows.
+#
+# This is the fast circuit breaker for a leveraged position: it never opens a new position or
+# changes the strategy's target, it only checks the existing drawdown/daily-loss limits and
+# flattens if breached -- see aapl_sma.LEVERAGE_MULTIPLIER and README's "Leverage" section for
+# why run_daily.py's once-a-day cadence alone isn't fast enough once leverage is in play.
+on:
+  schedule:
+    - cron: "15 14-20 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  intraday-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run intraday risk check
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python -m src.trading.intraday_check
+
+      - name: Persist trade log / risk state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/orders/trade_log.csv data/risk/
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update trade log / risk state [skip ci]"
+            git push
+          fi

@@ -1,0 +1,52 @@
+name: Run Daily Trading Script
+
+# schedule: is UTC-only and can't express "9:35am US/Eastern" directly since ET flips between
+# UTC-4 (EDT) and UTC-5 (EST) across DST -- scheduling both UTC equivalents keeps this correct
+# year-round without manual updates twice a year. The "wrong" one of the two either finds the
+# market still closed (clean early exit) or the signal already matches the held position (the
+# signal-unchanged skip in run_daily.py) -- either way it's a harmless no-op, never a duplicate
+# trade, by design of the underlying script.
+on:
+  schedule:
+    - cron: "35 13 * * 1-5"  # 9:35am EDT (UTC-4)
+    - cron: "35 14 * * 1-5"  # 9:35am EST (UTC-5)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  run-daily:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run daily trading script
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python -m src.trading.run_daily
+
+      # runners are ephemeral -- a fresh checkout every run -- so the trade log and any risk
+      # state written this run have to be committed back or they'd silently reset next time
+      - name: Persist trade log / risk state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/orders/trade_log.csv data/risk/
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update trade log / risk state [skip ci]"
+            git push
+          fi
