@@ -17,14 +17,15 @@ Extra
 
 1. `pip install -r requirements.txt`
 2. `pip install -e .` — installs `src` and `tests` as importable packages (see `pyproject.toml`), so `from src.data.market_data import get_bars` and `from tests.donchian.donchian import ...` work no matter where a script is run from.
-3. Copy `.env.example` to `.env` and fill in your real Alpaca API key/secret. `.env` is git-ignored — never commit real credentials.
+3. Copy `.env.example` to `.env` and fill in your real Alpaca API key/secret (required) and, optionally, an `NTFY_TOPIC` for push notifications — see `.env.example` for details on each. `.env` is git-ignored — never commit real credentials. Running via GitHub Actions instead of locally uses the same values, stored as repo Secrets rather than a `.env` file (see "Automation" below).
 
 ## Project Structure
 
 ```
 src/
   config.py           # loads .env, builds the shared Alpaca clients (get_alpaca_client for data,
-                       # get_alpaca_trading_client for orders) and the ALPACA_PAPER paper/live flag
+                       # get_alpaca_trading_client for orders), the ALPACA_PAPER paper/live flag,
+                       # and the optional NTFY_TOPIC notification setting
   bar_config.py        # BAR_CONFIG: per-interval constants (annualization, walk-forward retrain cadence)
   data/
     market_data.py      # get_bars(): unified yfinance/Alpaca data fetcher, same output shape either way
@@ -37,25 +38,37 @@ src/
     executor.py            # order sizing, marketable-limit submission (with client_order_id
                             # idempotency), fill reconciliation, and CSV trade logging
     run_daily.py            # entrypoint: risk checks -> compute signal -> rebalance -> log -> notify.
-                            # meant to run once per trading day (scheduling is external -- cron /
-                            # Task Scheduler / the `schedule` skill, not built into this repo)
-    eod_summary.py           # separate entrypoint, meant to run once after market close: sends a
-                             # daily PnL + portfolio-stats notification
+                            # runs once per trading day near market open, scheduled by
+                            # .github/workflows/run_daily.yml (see "Automation" below)
+    eod_summary.py           # separate entrypoint, runs once after market close: sends a daily
+                             # PnL + portfolio-stats notification (eod_summary.yml)
+    intraday_check.py        # separate entrypoint, runs ~hourly during market hours: the fast
+                             # circuit breaker leverage needs (intraday_check.yml)
   risk/
     risk_manager.py         # market-hours check, max-drawdown kill switch (persisted halt requiring
                              # manual risk_manager.clear_halt()), daily loss limit (self-clearing),
                              # flatten_position()
-  dashboard/            # (empty for now — reserved for the results dashboard; data/orders/trade_log.csv
-                        # is written in a shape meant to be read from here)
+  dashboard/
+    build_dashboard.py      # renders data/orders/trade_log.csv + live Alpaca account/portfolio
+                             # data into a single static index.html (no server, no JS) --
+                             # published to GitHub Pages as the last step of every workflow
   notifications/
     notifier.py             # send_notification(): push via ntfy.sh (plain HTTPS POST, no account
                              # needed). Optional -- config is read lazily, so nothing else breaks
                              # if it's left unconfigured
   utils/                # (empty for now)
 
-data/
-  orders/trade_log.csv  # append-only log of every rebalance order run_daily.py submits (git-ignored)
-  risk/halt_state.json  # present only when the max-drawdown kill switch has tripped (git-ignored)
+data/                   # tracked in git -- see .gitignore's negated patterns and the
+                        # "Automation" section below for why (ephemeral GitHub Actions runners)
+  orders/trade_log.csv  # append-only log of every rebalance order run_daily.py submits
+  risk/halt_state.json         # present only when the max-drawdown kill switch has tripped
+  risk/daily_loss_state.json   # same-day dedup so intraday_check.py doesn't re-notify hourly
+  risk/eod_summary_state.json  # same-day dedup for eod_summary.py's DST double-scheduling
+
+public/                 # src/dashboard/build_dashboard.py's output -- gitignored, never
+                        # committed, exists only transiently on the runner before Pages upload
+
+.github/workflows/      # run_daily.yml, eod_summary.yml, intraday_check.yml -- see "Automation" below
 
 tests/                  # NOTE: this is a strategy research/prototyping area, not pytest unit tests
   bar_permute.py         # Monte Carlo permutation testing utility shared by every strategy below
@@ -66,6 +79,7 @@ tests/                  # NOTE: this is a strategy research/prototyping area, no
   sma/
     sma.py                 # 2-SMA crossover strategy, with annualized Sharpe ratio and profit factor
     insample_sma_mcpt.py         # permutation test for the SMA in-sample result
+    walkforward_sma_mcpt.py      # permutation test for the walk-forward result
   three_sma/
     three_sma.py                 # 3-SMA variant: long only when fast > med > slow are all aligned
     insample_three_sma_mcpt.py   # permutation test for the 3-SMA in-sample result
@@ -120,7 +134,7 @@ What does **not** auto-scale: things like the rolling `window` size or a strateg
 
 ## Live Trading (AAPL SMA)
 
-The first strategy graduated from `tests/sma/` into live (currently **paper**) execution. Three entrypoints, meant to run on a schedule — not automated yet, see "Next Steps" below:
+The first strategy graduated from `tests/sma/` into live (currently **paper**) execution. Three entrypoints, each scheduled by its own GitHub Actions workflow — see "Automation" below for how and when:
 
 - `python -m src.trading.run_daily` — meant to run once per trading day near market open. Order of operations: is the kill switch already tripped? → is the market even open? → has max drawdown breached? → has today's loss limit breached? → compute today's signal from fresh bars → if the signal doesn't actually imply a different position than the one currently held, do nothing → otherwise size and submit a marketable-limit rebalance order, wait for it to fill, log it.
 - `python -m src.trading.eod_summary` — a separate entrypoint, meant to run once after market close: sends a notification with today's equity, PnL, drawdown, and position size.
@@ -146,12 +160,20 @@ Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `in
 
 **Scheduling around DST without timezone-aware cron**: GitHub's `schedule:` trigger is UTC-only, and US/Eastern flips between UTC-4 (EDT) and UTC-5 (EST) across the year. Rather than hand-adjusting the cron twice a year, `run_daily`/`eod_summary` each schedule *both* UTC equivalents of their target ET time. The "wrong" one of the two either finds the market closed (clean early exit) or — for `run_daily` — finds the signal already matches the held position (the signal-unchanged skip) and no-ops; for `eod_summary`, which has no such natural guard, a small same-day dedup state file (`data/risk/eod_summary_state.json`) makes the second firing a silent no-op instead of a duplicate notification. `intraday_check` runs hourly across a wider UTC band (14:15-20:15) that covers market hours in both DST states, with the same tolerant just-print-and-exit behavior outside actual market hours.
 
-**Ephemeral-runner state persistence**: every scheduled run starts from a fresh `git checkout` — nothing written to disk (the trade log, halt state) would survive to the next run otherwise. Each workflow's last step commits `data/orders/trade_log.csv` and anything under `data/risk/` back to the repo (`git diff --cached --quiet` guards against an empty commit when nothing changed). This required un-ignoring those specific files in `.gitignore`, which still ignores every other CSV/JSON by default.
+**Ephemeral-runner state persistence**: every scheduled run starts from a fresh `git checkout` — nothing written to disk (the trade log, halt state) would survive to the next run otherwise. Each workflow's last step commits `data/orders/trade_log.csv` and anything under `data/risk/` back to the repo (`git diff --cached --quiet` guards against an empty commit when nothing changed). This required un-ignoring those specific files in `.gitignore`, which still ignores every other CSV/JSON by default. Getting this right surfaced a real, previously-invisible bug: `.gitignore` does **not** support trailing inline comments — a `#` anywhere but the start of a line is read as a literal part of the pattern, not a comment. `data/risk/*.json  # some comment` and `*.csv  # some comment` had silently matched nothing since the day they were written, meaning those ignore rules had never actually been active (harmless by luck, since the only files that ever landed there were the ones meant to be tracked anyway — but any stray CSV or JSON would have been trackable too, which was never the intent). Fixed by moving every comment onto its own line.
 
 **Same-day duplicate-notification guards**: two small state files, both self-clearing by design (checked against `dt.date.today()`, so a new day naturally invalidates them with no cleanup needed) — `eod_summary_state.json` (above) and `data/risk/daily_loss_state.json`, which stops `intraday_check.py` from re-flattening (harmlessly) and re-notifying every single hourly check on a day where the daily-loss limit stays breached. The max-drawdown breach doesn't need an equivalent, since its halt already persists via `risk_manager.is_halted()`.
 
-## Next Steps: Dashboard & Cloud VM
+## Dashboard (GitHub Pages)
 
-- **A dashboard**: not built yet. Current plan is a static-HTML generator (reading `data/orders/trade_log.csv` + Alpaca's account/portfolio-history endpoints) published to **GitHub Pages** as a step in the existing workflows, rather than a persistent Flask server — matches this system's actual once-to-several-times-a-day update cadence, and free Pages hosting requires the repo to be public (agreed acceptable for this project).
-- **A cloud VM** remains the planned move for if/when this grows into intraday strategies, at which point once-an-hour `intraday_check` cadence and GitHub's scheduling imprecision (documented several-minute delays, occasional skips under load) stop being good enough. The trading code itself needs no changes to move (`git clone` + recreate `.env` + `pip install -r requirements.txt`) — only the scheduling layer (`cron` with the VM's timezone set to `America/New_York`, instead of GitHub Actions) and, if the dashboard has become a persistent server by then, running it as a `systemd` service.
-- One thing to watch if research/backtest scripts ever run at scale in either of these places: yfinance is occasionally rate-limited from datacenter IP ranges (see "Data Sources" above). Not expected to matter for the live AAPL SMA path itself, since its daily data pull already routes through Alpaca.
+`src/dashboard/build_dashboard.py` renders a single static `index.html` (dark theme, no JavaScript, no external assets — everything, including the equity curve, is inline SVG/CSS) from `data/orders/trade_log.csv` plus Alpaca's live account/portfolio-history endpoints: current equity, today's PnL, drawdown from peak, annualized Sharpe ratio, position size, a halted-status banner when relevant, an equity curve, and a recent-activity table. No database — the CSV and Alpaca's own API are the only sources of truth, matching the rest of this system's design. Sharpe uses the same `(mean / std) * sqrt(bars_per_year)` convention as every strategy file in `tests/`, computed from Alpaca's daily portfolio-history equity curve rather than a backtest's return column, and renders as "N/A" rather than a misleading number when there isn't enough history yet or equity hasn't moved at all.
+
+It's a **build step, not a server**: every one of the three workflows (`run_daily`, `eod_summary`, `intraday_check`) runs it as its last step and publishes the result via `actions/upload-pages-artifact` + `actions/deploy-pages`, so the page refreshes on whatever cadence the workflow that happened to run last dictates — up to roughly hourly during market hours via `intraday_check`. The generated `public/` directory is never committed to the repo (gitignored) — it only exists transiently on the runner between generation and upload.
+
+**One manual step required** (can't be done via a file change): in the repo's Settings → Pages, set **Source** to **"GitHub Actions"** (not the older branch-based option) — this is what makes the `actions/deploy-pages` step have somewhere to publish to. After that, the workflows handle everything else.
+
+## Next Steps: Cloud VM
+
+A cloud VM remains the planned move for if/when this grows into intraday strategies, at which point once-an-hour `intraday_check` cadence and GitHub's scheduling imprecision (documented several-minute delays, occasional skips under load) stop being good enough. The trading code itself needs no changes to move (`git clone` + recreate `.env` + `pip install -r requirements.txt`) — only the scheduling layer (`cron` with the VM's timezone set to `America/New_York`, instead of GitHub Actions), and the dashboard would need to become a persistent Flask/similar server run as a `systemd` service rather than a static-site build step, since a VM doesn't have GitHub Pages' free static hosting built in the way this repo does.
+
+One thing to watch if research/backtest scripts ever run at scale on a VM: yfinance is occasionally rate-limited from datacenter IP ranges (see "Data Sources" above). Not expected to matter for the live AAPL SMA path itself, since its daily data pull already routes through Alpaca.

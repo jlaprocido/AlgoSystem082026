@@ -65,11 +65,18 @@ logs/
 *.log
 data/cache/
 data/backtest_results/
-data/risk/*.json  # runtime risk state (halt/daily-loss/EOD dedup) -- ignored by default...
-*.csv  # ...same for CSVs (order history) -- ignored by default...
-# ...EXCEPT these specific runtime files: GitHub Actions runners are ephemeral (a fresh
-# checkout every scheduled run), so these have to be committed back to the repo by the
-# workflow itself or trade history / the kill-switch state would silently reset every run
+# src/dashboard/build_dashboard.py output -- uploaded straight to GitHub Pages by the
+# workflows as a build artifact, never committed to the repo
+public/
+# runtime risk state (halt/daily-loss/EOD dedup) and CSVs (order history) are ignored by
+# default... EXCEPT the specific runtime files negated below: GitHub Actions runners are
+# ephemeral (a fresh checkout every scheduled run), so those have to be committed back to the
+# repo by the workflow itself or trade history / the kill-switch state would silently reset
+# every run. NOTE: a `#` anywhere but the start of a .gitignore line is NOT a comment -- it's
+# read as a literal part of the pattern, silently matching nothing. Keep comments on their own
+# line, never trailing a pattern (this exact mistake previously left both lines below inert).
+data/risk/*.json
+*.csv
 !data/orders/trade_log.csv
 !data/risk/halt_state.json
 !data/risk/daily_loss_state.json
