@@ -19,13 +19,17 @@ python-json-logger>=2.0.7  # JSON formatted logging (optional)
 # Configuration
 python-dotenv>=1.0.0    # Load settings/credentials from .env
 
+# Notifications
+requests>=2.31.0        # ntfy.sh push notifications (src/notifications/notifier.py) -- listed
+                         # explicitly even though alpaca-py also depends on it transitively
+
 
 # ============================================================================
 # INSTALLATION
 # ============================================================================
 # Install all dependencies:
-pip install -r requirements.txt
-
+#   pip install -r requirements.txt
+#
 # Upgrade all packages:
-pip install --upgrade -r requirements.txt
+#   pip install --upgrade -r requirements.txt
 
