@@ -22,7 +22,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: "intraday-check-pages"
   cancel-in-progress: false
 
 jobs:

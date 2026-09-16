@@ -1,15 +1,15 @@
 name: Run Daily Trading Script
 
-# schedule: is UTC-only and can't express "9:35am US/Eastern" directly since ET flips between
-# UTC-4 (EDT) and UTC-5 (EST) across DST -- scheduling both UTC equivalents keeps this correct
-# year-round without manual updates twice a year. The "wrong" one of the two either finds the
-# market still closed (clean early exit) or the signal already matches the held position (the
-# signal-unchanged skip in run_daily.py) -- either way it's a harmless no-op, never a duplicate
-# trade, by design of the underlying script.
+# Single cron entry, deliberately using the EST-equivalent UTC time (14:35) rather than
+# double-scheduling both DST equivalents: schedule: is UTC-only, so during EDT (roughly
+# Mar-Nov) this actually fires at 10:35am ET -- an hour later than the ideal 9:35am, but still
+# comfortably inside market hours. The alternative (scheduling the EDT-equivalent 13:35 UTC
+# instead) would fire at 8:35am ET during EST months -- *before* the market opens, which would
+# silently no-op every single morning for the ~4 winter months, missing trading entirely rather
+# than just running an hour late.
 on:
   schedule:
-    - cron: "35 13 * * 1-5"  # 9:35am EDT (UTC-4)
-    - cron: "35 14 * * 1-5"  # 9:35am EST (UTC-5)
+    - cron: "35 14 * * 1-5"  # ~9:35am ET (exact during EST, ~10:35am during EDT)
   workflow_dispatch: {}
 
 permissions:
@@ -18,7 +18,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: "run-daily-pages"
   cancel-in-progress: false
 
 jobs:
