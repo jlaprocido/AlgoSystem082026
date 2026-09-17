@@ -1,15 +1,15 @@
 name: Run Daily Trading Script
 
-# Single cron entry, deliberately using the EST-equivalent UTC time (14:35) rather than
-# double-scheduling both DST equivalents: schedule: is UTC-only, so during EDT (roughly
-# Mar-Nov) this actually fires at 10:35am ET -- an hour later than the ideal 9:35am, but still
-# comfortably inside market hours. The alternative (scheduling the EDT-equivalent 13:35 UTC
-# instead) would fire at 8:35am ET during EST months -- *before* the market opens, which would
-# silently no-op every single morning for the ~4 winter months, missing trading entirely rather
-# than just running an hour late.
+# Hand-computing a single "correct" UTC cron time was tried twice and got the actual wall-clock
+# time wrong both times (schedule: is UTC-only, and DST shifts the UTC-to-local offset twice a
+# year). Fixed properly this time: this cron fires every 5 minutes across a UTC band wide enough
+# to cover 9:45am America/Chicago in *both* DST states (14:45 UTC in CDT, 15:45 UTC in CST) --
+# the actual precise gating happens in Python via src/utils/scheduling.in_time_window(), using
+# real IANA tz data (zoneinfo), which handles DST transitions correctly forever with no manual
+# adjustment. Every other firing in this window is an intentional, cheap no-op.
 on:
   schedule:
-    - cron: "35 14 * * 1-5"  # ~9:35am ET (exact during EST, ~10:35am during EDT)
+    - cron: "*/5 14-15 * * 1-5"
   workflow_dispatch: {}
 
 permissions:

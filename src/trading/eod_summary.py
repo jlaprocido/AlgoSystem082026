@@ -7,8 +7,11 @@ from src.risk import risk_manager as rm
 from src.strategy import aapl_sma
 from src.trading import executor
 from src.trading.run_daily import notify
+from src.utils.scheduling import in_time_window
 
 # separate entrypoint from run_daily.py -- meant to run once after market close, not at open
+
+RUN_HOUR, RUN_MINUTE = 16, 0  # America/Chicago -- see src/utils/scheduling.py
 
 STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "risk" / "eod_summary_state.json"
 
@@ -25,10 +28,12 @@ def _mark_sent_today() -> None:
 
 
 def run() -> None:
-    # GitHub Actions cron can't express "4pm US/Eastern" directly (schedule: is UTC-only, and
-    # ET flips between UTC-4/UTC-5 across DST) -- the workflow schedules this at both UTC
-    # equivalents to stay correct year-round, which means it can fire twice on the same day.
-    # This guard makes the second firing a silent no-op instead of a duplicate notification.
+    if not in_time_window(RUN_HOUR, RUN_MINUTE):
+        print(f"Outside the scheduled run window ({RUN_HOUR}:{RUN_MINUTE:02d} America/Chicago) -- skipping.")
+        return
+
+    # a manual workflow_dispatch on top of the real scheduled run is still possible, so this
+    # same-day dedup guard stays as a safety net even with a single daily cron entry
     if _already_sent_today():
         print("EOD summary already sent today -- skipping.")
         return
@@ -47,10 +52,25 @@ def run() -> None:
     _, drawdown_pct = rm.check_max_drawdown(trading_client, max_drawdown_pct=1.0)
     current_shares = executor.get_current_shares(trading_client, symbol)
 
+    # total PnL since the strategy's own first trade, not since the account was funded --
+    # the account can sit flat for a while before the first real BUY, and that idle stretch
+    # isn't the strategy "performing," so it shouldn't be counted as part of its return
+    strategy_start = executor.find_strategy_start_date()
+    total_pnl_pct = total_pnl_dollars = None
+    if strategy_start:
+        dates, equity_history = rm.get_real_equity_history(trading_client)
+        start_equity = next((e for d, e in zip(dates, equity_history) if d >= strategy_start), None)
+        if start_equity:
+            total_pnl_dollars = equity - start_equity
+            total_pnl_pct = equity / start_equity - 1
+
     message = (
         f"{symbol} EOD: equity = ${equity:,.2f} ({daily_pnl_pct:+.2%}, ${daily_pnl_dollars:+,.2f} today), "
         f"drawdown = {drawdown_pct:.2%} from peak, position = {current_shares} shares"
     )
+    if total_pnl_pct is not None:
+        message += f", total PnL since {strategy_start} = {total_pnl_pct:+.2%} (${total_pnl_dollars:+,.2f})"
+
     print(message)
     notify(message)
     _mark_sent_today()

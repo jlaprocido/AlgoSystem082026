@@ -23,6 +23,11 @@ python-dotenv>=1.0.0    # Load settings/credentials from .env
 requests>=2.31.0        # ntfy.sh push notifications (src/notifications/notifier.py) -- listed
                          # explicitly even though alpaca-py also depends on it transitively
 
+# Scheduling
+tzdata>=2024.1           # IANA timezone data for zoneinfo (src/utils/scheduling.py) -- Linux/Mac
+                         # ship this at the OS level, but Windows doesn't, so this is listed
+                         # explicitly rather than relying on it coming in transitively via pandas
+
 
 # ============================================================================
 # INSTALLATION

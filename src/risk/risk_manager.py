@@ -35,6 +35,25 @@ def check_max_drawdown(trading_client: TradingClient, max_drawdown_pct: float) -
     return drawdown_pct >= max_drawdown_pct, drawdown_pct
 
 
+def get_real_equity_history(trading_client: TradingClient) -> tuple[list, list]:
+    """Returns (dates, equity_values) with Alpaca's padding stripped out. get_portfolio_history
+    pads every day before the account had any real activity with a literal 0.0 (not None) --
+    e.g. 230 padding days out of 250 on a month-old account -- which would otherwise dominate
+    any chart or calculation built from this with a meaningless flat "$0" stretch. Shared by
+    eod_summary.py (total PnL) and build_dashboard.py (equity chart, Sharpe ratio)."""
+    history = trading_client.get_portfolio_history(
+        GetPortfolioHistoryRequest(period="1A", timeframe="1D")
+    )
+    real_points = [
+        (dt.datetime.fromtimestamp(t, dt.timezone.utc).date(), e)
+        for t, e in zip(history.timestamp, history.equity)  # type: ignore[reportAttributeAccessIssue]
+        if e
+    ]
+    dates = [d for d, _ in real_points]
+    equity = [e for _, e in real_points]
+    return dates, equity
+
+
 def check_daily_loss(trading_client: TradingClient, max_daily_loss_pct: float) -> tuple[bool, float]:
     account = trading_client.get_account()
     equity = float(account.equity)  # type: ignore[reportAttributeAccessIssue]

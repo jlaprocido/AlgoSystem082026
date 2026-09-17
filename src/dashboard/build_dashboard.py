@@ -5,10 +5,8 @@ import math
 import statistics
 from pathlib import Path
 
-from alpaca.trading.requests import GetPortfolioHistoryRequest
-
 from src.bar_config import BAR_CONFIG
-from src.config import get_alpaca_client, get_alpaca_trading_client
+from src.config import get_alpaca_trading_client
 from src.data.market_data import get_bars
 from src.risk import risk_manager as rm
 from src.strategy import aapl_sma
@@ -77,6 +75,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <div class="stats">
     <div class="stat"><div class="label">Equity</div><div class="value">${equity:,.2f}</div></div>
     <div class="stat"><div class="label">Today's PnL</div><div class="value {pnl_class}">{daily_pnl_pct:+.2%}</div></div>
+    <div class="stat"><div class="label">Total PnL</div><div class="value {total_pnl_class}">{total_pnl_display}</div></div>
     <div class="stat"><div class="label">Drawdown from Peak</div><div class="value">{drawdown_pct:.2%}</div></div>
     <div class="stat"><div class="label">Sharpe Ratio</div><div class="value">{sharpe_display}</div></div>
     <div class="stat"><div class="label">Position</div><div class="value">{current_shares} sh</div></div>
@@ -262,7 +261,6 @@ def build_trade_rows_html(trades: list[dict]) -> str:
 
 def run() -> None:
     trading_client = get_alpaca_trading_client()
-    data_client = get_alpaca_client()
     symbol = aapl_sma.SYMBOL
 
     account = trading_client.get_account()
@@ -277,37 +275,41 @@ def run() -> None:
     current_shares = executor.get_current_shares(trading_client, symbol)
     halted = rm.is_halted()
 
-    history = trading_client.get_portfolio_history(
-        GetPortfolioHistoryRequest(period="1A", timeframe="1D")
-    )
+    # dates/equity here already has Alpaca's pre-funding 0.0 padding stripped (see
+    # get_real_equity_history's docstring) -- but the account can still sit funded-and-flat
+    # for a while before the strategy's first real trade, so this trims further to start
+    # exactly where the strategy itself started, not just where the account started. Both the
+    # chart and every metric derived from it (Sharpe, Total PnL below) use this same window,
+    # so "how has the strategy done" never gets diluted by weeks of doing nothing first.
+    all_dates, all_equity = rm.get_real_equity_history(trading_client)
+    strategy_start = executor.find_strategy_start_date()
+    if strategy_start:
+        trimmed = [(d, e) for d, e in zip(all_dates, all_equity) if d >= strategy_start]
+        dates = [d for d, _ in trimmed]
+        equity_series = [e for _, e in trimmed]
+    else:
+        dates, equity_series = all_dates, all_equity
 
-    # Alpaca pads this series with literal 0.0 entries (not None) for every day before the
-    # account had any real activity -- e.g. 230 padding days out of 250 on a month-old account.
-    # Plotting those would show a long, meaningless flat "$0" line dominating the chart, which
-    # is exactly the kind of uninformative axis-less chart this was meant to fix
-    real_points = [
-        (dt.datetime.fromtimestamp(t, dt.timezone.utc).date(), e)
-        for t, e in zip(history.timestamp, history.equity)  # type: ignore[reportAttributeAccessIssue]
-        if e
-    ]
+    total_pnl_pct = total_pnl_dollars = None
+    if len(equity_series) >= 1:
+        total_pnl_dollars = equity - equity_series[0]
+        total_pnl_pct = equity / equity_series[0] - 1
 
-    if len(real_points) >= 2:
-        dates = [d for d, _ in real_points]
-        equity_series = [e for _, e in real_points]
+    if len(dates) >= 2:
         benchmark_ratios = build_benchmark_series(symbol, dates)
         benchmark_series = [equity_series[0] * r for r in benchmark_ratios] if benchmark_ratios else None
 
-        chart_subhead = f"Since {dates[0].strftime('%b %d, %Y')}"
+        since_label = "first trade" if strategy_start else "account funded, no trades yet"
+        chart_subhead = f"Since {dates[0].strftime('%b %d, %Y')} ({since_label})"
         if benchmark_ratios:
-            strategy_return = equity_series[-1] / equity_series[0] - 1
             benchmark_return = benchmark_ratios[-1] - 1
-            chart_subhead += f" -- Strategy {strategy_return:+.2%} vs. Buy & Hold {benchmark_return:+.2%}"
+            chart_subhead += f" -- Strategy {total_pnl_pct:+.2%} vs. Buy & Hold {benchmark_return:+.2%}"
     else:
         dates, equity_series, benchmark_series = [], [], None
-        chart_subhead = "Not enough history yet"
+        chart_subhead = "Not enough history yet -- no trades placed"
 
     equity_svg = build_chart_svg(dates, equity_series, benchmark_series)
-    sharpe_ratio = compute_sharpe_ratio(history.equity)  # type: ignore[reportAttributeAccessIssue]
+    sharpe_ratio = compute_sharpe_ratio(equity_series)
 
     trades = read_recent_trades()
 
@@ -321,6 +323,8 @@ def run() -> None:
         equity=equity,
         daily_pnl_pct=daily_pnl_pct,
         pnl_class="positive" if daily_pnl_pct >= 0 else "negative",
+        total_pnl_display=f"{total_pnl_pct:+.2%}" if total_pnl_pct is not None else "N/A",
+        total_pnl_class=("positive" if total_pnl_pct >= 0 else "negative") if total_pnl_pct is not None else "",
         drawdown_pct=drawdown_pct,
         sharpe_display=f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else "N/A",
         current_shares=current_shares,

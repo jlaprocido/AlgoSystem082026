@@ -6,6 +6,9 @@ from src.notifications import notifier
 from src.risk import risk_manager as rm
 from src.strategy import aapl_sma
 from src.trading import executor
+from src.utils.scheduling import in_time_window
+
+RUN_HOUR, RUN_MINUTE = 9, 45  # America/Chicago -- see src/utils/scheduling.py
 
 MAX_DRAWDOWN_PCT = 0.15  # from peak account equity -- breach requires manual risk_manager.clear_halt()
 MAX_DAILY_LOSS_PCT = 0.05  # from yesterday's close -- self-clears the next trading day
@@ -56,6 +59,10 @@ def check_risk_limits(trading_client, symbol: str) -> bool:
 
 
 def run() -> None:
+    if not in_time_window(RUN_HOUR, RUN_MINUTE):
+        print(f"Outside the scheduled run window ({RUN_HOUR}:{RUN_MINUTE:02d} America/Chicago) -- skipping.")
+        return
+
     trading_client = get_alpaca_trading_client()
     data_client = get_alpaca_client()
     symbol = aapl_sma.SYMBOL
@@ -98,6 +105,7 @@ def run() -> None:
     if bool(signal) == (current_shares > 0):
         print(f"Signal unchanged ({'long' if signal else 'flat'}) -- holding {current_shares} shares, no trade needed.")
         executor.log_trade(None, symbol, STRATEGY_NAME, signal, note="signal_unchanged")
+        notify(f"{symbol} bot: daily check-in -- signal {'long' if signal else 'flat'}, holding {current_shares} shares, no trade needed.")
         return
 
     target_shares = executor.get_target_shares(

@@ -1,14 +1,14 @@
 name: EOD Summary
 
-# Single cron entry, deliberately using the EST-equivalent UTC time (21:05) -- see
-# run_daily.yml for the full reasoning. During EDT this fires at 5:05pm ET instead of 4:05pm,
-# an hour later than ideal but the market's unambiguously closed either way, unlike run_daily
-# where picking the wrong equivalent would mean firing before open. eod_summary.py's same-day
-# dedup guard is still kept as a safety net (e.g. a manual workflow_dispatch on top of the
-# scheduled run), even though a single cron entry makes a true duplicate far less likely now.
+# Fires every 5 minutes across a UTC band wide enough to cover 4:00pm America/Chicago in *both*
+# DST states (21:00 UTC in CDT, 22:00 UTC in CST) -- see run_daily.yml for why this moved off
+# hand-computed UTC cron times entirely. The actual precise gating happens in Python via
+# src/utils/scheduling.in_time_window() (real IANA tz data, DST-proof forever). The same-day
+# dedup guard in eod_summary.py stays as a safety net against a manual workflow_dispatch on top
+# of the real scheduled run.
 on:
   schedule:
-    - cron: "5 21 * * 1-5"  # ~4:05pm ET (exact during EST, ~5:05pm during EDT)
+    - cron: "*/5 21-22 * * 1-5"
   workflow_dispatch: {}
 
 permissions:

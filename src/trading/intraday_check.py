@@ -2,6 +2,9 @@ from src.config import get_alpaca_trading_client
 from src.risk import risk_manager as rm
 from src.strategy import aapl_sma
 from src.trading.run_daily import check_risk_limits
+from src.utils.scheduling import in_hourly_window
+
+START_HOUR, END_HOUR = 10, 15  # America/Chicago, inclusive -- see src/utils/scheduling.py
 
 # Separate entrypoint from run_daily.py -- meant to run every 1-2 hours during market hours,
 # not once a day. Exists specifically because a leveraged position (see aapl_sma.LEVERAGE_MULTIPLIER)
@@ -11,6 +14,10 @@ from src.trading.run_daily import check_risk_limits
 
 
 def run() -> None:
+    if not in_hourly_window(START_HOUR, END_HOUR):
+        print(f"Outside the hourly check window ({START_HOUR}:00-{END_HOUR}:00 America/Chicago) -- skipping.")
+        return
+
     trading_client = get_alpaca_trading_client()
     symbol = aapl_sma.SYMBOL
 

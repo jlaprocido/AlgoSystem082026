@@ -18,6 +18,23 @@ TRADE_LOG_FIELDS = [
 ]
 
 
+def find_strategy_start_date() -> dt.date | None:
+    # the account can sit funded-but-flat for a while before the strategy's first real trade
+    # (e.g. weeks of $10k doing nothing before the first BUY) -- callers that want to measure
+    # the strategy's own performance (not the account's) should start from this date, not from
+    # whenever the account happened to be funded. Shared by eod_summary.py and build_dashboard.py.
+    if not TRADE_LOG_PATH.exists():
+        return None
+
+    with open(TRADE_LOG_PATH, newline="") as f:
+        filled = [row for row in csv.DictReader(f) if row.get("status") == "filled"]
+    if not filled:
+        return None
+
+    first = min(filled, key=lambda row: row["timestamp"])
+    return dt.datetime.fromisoformat(first["timestamp"]).date()
+
+
 def get_latest_quote(data_client: StockHistoricalDataClient, symbol: str):
     quote = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbol))[symbol]  # type: ignore[reportAttributeAccessIssue]
 
