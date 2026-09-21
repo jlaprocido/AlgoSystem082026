@@ -56,16 +56,14 @@ src/
     notifier.py             # send_notification(): push via ntfy.sh (plain HTTPS POST, no account
                              # needed). Optional -- config is read lazily, so nothing else breaks
                              # if it's left unconfigured
-  utils/
-    scheduling.py            # in_time_window()/in_hourly_window(): DST-proof local-time
-                             # gating for the workflows below, via zoneinfo (real IANA tz data)
 
 data/                   # tracked in git -- see .gitignore's negated patterns and the
                         # "Automation" section below for why (ephemeral GitHub Actions runners)
   orders/trade_log.csv  # append-only log of every rebalance order run_daily.py submits
   risk/halt_state.json         # present only when the max-drawdown kill switch has tripped
   risk/daily_loss_state.json   # same-day dedup so intraday_check.py doesn't re-notify hourly
-  risk/eod_summary_state.json  # same-day dedup for eod_summary.py's DST double-scheduling
+  risk/eod_summary_state.json  # same-day dedup for eod_summary.py, safety net against a manual
+                                # workflow_dispatch on top of the real scheduled run
 
 public/                 # src/dashboard/build_dashboard.py's output -- gitignored, never
                         # committed, exists only transiently on the runner before Pages upload
@@ -160,7 +158,7 @@ The first strategy graduated from `tests/sma/` into live (currently **paper**) e
 
 Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `intraday_check.yml`) schedule the three entrypoints above, each also runnable on demand via `workflow_dispatch`. Requires three repo secrets: `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `NTFY_TOPIC`.
 
-**Scheduling around DST, properly this time**: GitHub's `schedule:` trigger is UTC-only. Two earlier attempts hand-computed a "correct" fixed UTC cron time and got the actual wall-clock time wrong both times — the first didn't account for DST at all, the second picked a single UTC constant that drifts by an hour depending on the season, which is only "correct" for half the year by design. The actual fix (`src/utils/scheduling.py`): each workflow's cron fires *frequently* (every 5-15 minutes) across a UTC band wide enough to cover the target America/Chicago time in **both** DST states, and the precise gating happens in **Python**, using real IANA timezone data (`zoneinfo`) via `in_time_window()` (once at a specific time) or `in_hourly_window()` (once per hour across a range) — every firing outside the actual target window is an intentional, cheap no-op. Since `zoneinfo` correctly handles the DST transition itself, this needs no manual adjustment ever again, unlike a fixed UTC cron. A manual `workflow_dispatch` trigger always bypasses the time check (detected via GitHub's built-in `GITHUB_EVENT_NAME` variable) — a human running this by hand wants it to actually do something, not silently no-op on the clock. Current targets: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 4:00pm, all America/Chicago.
+**Scheduling, kept simple**: each workflow's `cron:` is a single fixed UTC time targeting its America/Chicago run time directly — no in-Python time-window gating. GitHub's `schedule:` trigger is UTC-only and doesn't follow DST, so these crons are only exactly right for one DST state at a time (currently CDT, UTC-5) and need a manual one-line shift twice a year (see the comment at the top of each workflow file for the CST equivalent). GitHub Actions' scheduled triggers are also documented as best-effort and can run late, especially on lower-activity repos — that's an accepted limitation for now rather than something worked around in code, since a VM move (see below) is the actual fix and will use a real local-time system cron instead. Current targets: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 4:00pm, all America/Chicago.
 
 **Concurrency groups are per-repo, not per-workflow**: all three workflows initially shared the literal `concurrency: group: "pages"`, copied from GitHub's official single-workflow Pages template without realizing concurrency groups are shared *repo-wide* across every workflow file using the same name, not scoped to the file that declares it. With `cancel-in-progress: false`, GitHub keeps only one additional run queued per group and drops older superseded ones — so all three workflows were needlessly serialized against each other, silently dropping most of `intraday_check`'s hourly triggers and cascading multi-hour delays into the other two. Each workflow now has its own distinct group (`run-daily-pages`, `eod-summary-pages`, `intraday-check-pages`).
 

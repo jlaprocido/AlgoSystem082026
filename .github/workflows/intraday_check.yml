@@ -1,10 +1,7 @@
 name: Intraday Risk Check
 
-# Fires every 15 minutes across a UTC band wide enough to cover 10:00am-3:00pm America/Chicago
-# in *both* DST states (15:00-20:00 UTC in CDT, 16:00-21:00 UTC in CST) -- see run_daily.yml for
-# why this moved off hand-computed UTC cron times entirely. The actual once-per-hour gating
-# happens in Python via src/utils/scheduling.in_hourly_window() (real IANA tz data, DST-proof
-# forever); every other firing in this window is an intentional, cheap no-op.
+# Hourly, on the hour, 10am-3pm America/Chicago (15:00-20:00 UTC in CDT -- see run_daily.yml
+# for the DST caveat and why we're not building that out here with a VM move coming soon).
 #
 # This is the fast circuit breaker for a leveraged position: it never opens a new position or
 # changes the strategy's target, it only checks the existing drawdown/daily-loss limits and
@@ -12,7 +9,7 @@ name: Intraday Risk Check
 # why run_daily.py's once-a-day cadence alone isn't fast enough once leverage is in play.
 on:
   schedule:
-    - cron: "*/15 15-21 * * 1-5"
+    - cron: "0 15-20 * * 1-5"
   workflow_dispatch: {}
 
 permissions:

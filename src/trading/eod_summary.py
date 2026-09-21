@@ -7,11 +7,8 @@ from src.risk import risk_manager as rm
 from src.strategy import aapl_sma
 from src.trading import executor
 from src.trading.run_daily import notify
-from src.utils.scheduling import in_time_window
 
 # separate entrypoint from run_daily.py -- meant to run once after market close, not at open
-
-RUN_HOUR, RUN_MINUTE = 16, 0  # America/Chicago -- see src/utils/scheduling.py
 
 STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "risk" / "eod_summary_state.json"
 
@@ -28,10 +25,6 @@ def _mark_sent_today() -> None:
 
 
 def run() -> None:
-    if not in_time_window(RUN_HOUR, RUN_MINUTE):
-        print(f"Outside the scheduled run window ({RUN_HOUR}:{RUN_MINUTE:02d} America/Chicago) -- skipping.")
-        return
-
     # a manual workflow_dispatch on top of the real scheduled run is still possible, so this
     # same-day dedup guard stays as a safety net even with a single daily cron entry
     if _already_sent_today():

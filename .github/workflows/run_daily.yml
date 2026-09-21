@@ -1,15 +1,12 @@
 name: Run Daily Trading Script
 
-# Hand-computing a single "correct" UTC cron time was tried twice and got the actual wall-clock
-# time wrong both times (schedule: is UTC-only, and DST shifts the UTC-to-local offset twice a
-# year). Fixed properly this time: this cron fires every 5 minutes across a UTC band wide enough
-# to cover 9:45am America/Chicago in *both* DST states (14:45 UTC in CDT, 15:45 UTC in CST) --
-# the actual precise gating happens in Python via src/utils/scheduling.in_time_window(), using
-# real IANA tz data (zoneinfo), which handles DST transitions correctly forever with no manual
-# adjustment. Every other firing in this window is an intentional, cheap no-op.
+# 9:45am America/Chicago. schedule: is UTC-only and doesn't follow DST, so this is only exactly
+# right for CDT (UTC-5) -- flip to "45 15 * * 1-5" during CST (roughly Nov-Mar). We're moving
+# this to a VM soon where a real local-time cron handles DST on its own, so not worth building
+# out DST-proofing here in the meantime.
 on:
   schedule:
-    - cron: "*/5 14-15 * * 1-5"
+    - cron: "45 14 * * 1-5"
   workflow_dispatch: {}
 
 permissions:
