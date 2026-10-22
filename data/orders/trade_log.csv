@@ -36,3 +36,4 @@ timestamp,symbol,strategy,signal,side,qty,limit_price,client_order_id,status,fil
 2026-10-19T20:10:55.471569+00:00,AAPL,sma,,,0,,,market_closed,,,
 2026-10-20T18:43:10.322373+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
 2026-10-21T18:54:15.855163+00:00,AAPL,sma,1,buy,1,344.67,AAPL-sma-2026-10-21,filled,1,344.3,2026-10-21T18:54:14.322553+00:00
+2026-10-22T18:47:11.381299+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
