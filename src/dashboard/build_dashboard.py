@@ -4,6 +4,7 @@ import html
 import math
 import statistics
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from src.bar_config import BAR_CONFIG
 from src.config import get_alpaca_trading_client
@@ -19,8 +20,12 @@ from src.trading import executor
 OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "public"
 TRADE_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "orders" / "trade_log.csv"
 
-STRATEGY_COLOR = "#58a6ff"
-BENCHMARK_COLOR = "#d29922"
+PORTFOLIO_URL = "https://jameslaprocido.com/"
+REPO_URL = "https://github.com/jlaprocido/AlgoSystem082026"
+
+# same palette as the portfolio site (jameslaprocido.com) -- keep these in sync with its :root
+STRATEGY_COLOR = "#006747"
+BENCHMARK_COLOR = "#418fde"
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -28,78 +33,147 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="1800">
-<title>{symbol} SMA Bot Dashboard</title>
+<title>{symbol} SMA Bot | James Laprocido</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600;6..72,700&display=swap" rel="stylesheet">
 <style>
-  :root {{ color-scheme: dark; }}
+  :root {{
+    --ink: #0f2e24; --paper: #f2f7fa; --panel: #fff; --rule: #cddbe3; --muted: #4b5e66;
+    --accent: #006747; --soft: #dcecf9; --hero: #00432e; --sky: #71c5e8; --blue: #418fde;
+    --neg: #b3261e;
+    --serif: "Newsreader", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    color-scheme: light;
+  }}
+  * {{ box-sizing: border-box; }}
   body {{
-    background: #0d1117; color: #e6edf3;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    max-width: 900px; margin: 0 auto; padding: 2rem 1rem;
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 400 17px/1.65 var(--sans); -webkit-font-smoothing: antialiased;
+    min-height: 100vh; display: flex; flex-direction: column;
   }}
-  h1 {{ font-size: 1.4rem; margin-bottom: 0.25rem; }}
-  .updated {{ color: #8b949e; font-size: 0.85rem; margin-bottom: 1.5rem; }}
+  a {{ color: var(--accent); text-underline-offset: 3px; }}
+  .wrap {{ width: 100%; max-width: 960px; margin: 0 auto; padding: 0 20px; }}
+
+  .site-header {{ background: var(--hero); color: #fff; }}
+  .site-header .wrap {{ display: flex; justify-content: space-between; align-items: center; height: 52px; }}
+  .brand {{ font: 600 1.15rem var(--serif); color: #fff; text-decoration: none; }}
+  .site-header nav {{ display: flex; gap: 28px; }}
+  .site-header nav a {{ color: #fff; text-decoration: none; font: 500 0.95rem var(--sans); }}
+  .site-header nav a:hover {{ color: var(--sky); }}
+
+  .hero {{ background: var(--hero); color: #fff; padding: 40px 0 44px; border-bottom: 6px solid var(--sky); }}
+  .eyebrow {{ font: 600 .8rem var(--sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--sky); margin: 0 0 8px; }}
+  h1 {{ font: 700 clamp(2.2rem, 5vw, 3.2rem)/1.1 var(--serif); margin: 0 0 12px; letter-spacing: -0.01em; }}
+  .updated {{ color: #cfe3da; font-size: 0.9rem; margin: 20px 0 0; }}
+  .actions {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }}
+  .btn {{
+    display: inline-flex; align-items: center; justify-content: center; min-height: 48px; min-width: 150px;
+    padding: 12px 24px; border-radius: 4px; text-decoration: none; font: 500 1rem var(--sans);
+    background: #fff; color: var(--hero); border: 1px solid #fff; cursor: pointer;
+  }}
+  .btn:hover {{ opacity: 0.88; color: var(--hero); }}
+  .btn--line {{ background: none; color: #fff; border-color: rgba(255,255,255,.7); }}
+  .btn--line:hover {{ background: rgba(255,255,255,.12); color: #fff; opacity: 1; }}
+
+  main {{ padding: 32px 0 8px; flex: 1; }}
   .halted-banner {{
-    background: #3d1418; border: 1px solid #f85149; color: #ffa198;
-    padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1.5rem; font-weight: 600;
+    background: #fde8e6; border: 1px solid var(--neg); color: var(--neg);
+    padding: 12px 16px; border-radius: 4px; margin-bottom: 24px; font-weight: 600;
   }}
-  .stats {{
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 1rem; margin-bottom: 2rem;
-  }}
-  .stat {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; }}
-  .stat .label {{ color: #8b949e; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }}
-  .stat .value {{ font-size: 1.5rem; font-weight: 600; margin-top: 0.25rem; }}
-  .positive {{ color: #3fb950; }}
-  .negative {{ color: #f85149; }}
-  .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin-bottom: 2rem; }}
-  .card h2 {{ font-size: 1rem; margin: 0 0 0.25rem 0; color: #8b949e; font-weight: 500; }}
-  .card .subhead {{ font-size: 0.8rem; color: #6e7681; margin-bottom: 1rem; }}
-  .legend {{ display: flex; gap: 1.5rem; font-size: 0.8rem; margin-top: 0.5rem; }}
+  .stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; }}
+  .stat {{ background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 16px 20px; }}
+  .stat .label {{ color: var(--muted); font: 600 .75rem var(--sans); letter-spacing: 0.12em; text-transform: uppercase; }}
+  .stat .value {{ font: 500 1.9rem/1.2 var(--serif); margin-top: 4px; }}
+  .positive {{ color: var(--accent); }}
+  .negative {{ color: var(--neg); }}
+
+  .card {{ background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 20px; margin-bottom: 32px; }}
+  .card h2 {{ font: 500 1.6rem/1.2 var(--serif); margin: 0 0 4px; letter-spacing: -0.01em; }}
+  .card .subhead {{ font-size: 0.9rem; color: var(--muted); margin-bottom: 16px; }}
+  .legend {{ display: flex; gap: 24px; font-size: 0.85rem; margin-top: 8px; color: var(--muted); }}
   .legend span {{ display: inline-flex; align-items: center; gap: 0.4rem; }}
-  .swatch {{ display: inline-block; width: 12px; height: 3px; border-radius: 2px; }}
-  .axis-label {{ fill: #8b949e; font-size: 11px; font-family: inherit; }}
-  .grid-line {{ stroke: #21262d; stroke-width: 1; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
-  th, td {{ text-align: left; padding: 0.5rem; border-bottom: 1px solid #30363d; white-space: nowrap; }}
-  th {{ color: #8b949e; font-weight: 500; }}
-  .side-buy {{ color: #3fb950; }}
-  .side-sell {{ color: #f85149; }}
-  .table-wrap {{ overflow-x: auto; }}
-  footer {{ color: #6e7681; font-size: 0.8rem; text-align: center; margin-top: 2rem; }}
+  .swatch {{ display: inline-block; width: 14px; height: 3px; border-radius: 2px; }}
+  .axis-label {{ fill: var(--muted); font-size: 11px; font-family: var(--sans); }}
+  .grid-line {{ stroke: var(--rule); stroke-width: 1; }}
+
+  .table-wrap {{ max-height: 420px; overflow: auto; border: 1px solid var(--rule); border-radius: 4px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+  th, td {{ text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }}
+  th {{
+    position: sticky; top: 0; background: var(--soft); color: var(--ink);
+    font: 600 .75rem var(--sans); letter-spacing: 0.1em; text-transform: uppercase;
+  }}
+  tbody tr:last-child td {{ border-bottom: none; }}
+  td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  .side-buy {{ color: var(--accent); font-weight: 600; }}
+  .side-sell {{ color: var(--neg); font-weight: 600; }}
+  .muted {{ color: var(--muted); }}
+  .status-ok {{ color: var(--accent); font-weight: 600; }}
+  .status-bad {{ color: var(--neg); font-weight: 600; }}
+
+  footer {{ background: var(--hero); color: #cfe3da; border-top: 6px solid var(--sky); margin-top: 24px; padding: 24px 0; font-size: 0.85rem; }}
+
+  @media (max-width: 640px) {{
+    .stats {{ grid-template-columns: repeat(2, 1fr); }}
+    .btn {{ flex: 1 1 100%; }}
+  }}
 </style>
 </head>
 <body>
-  <h1>{symbol} SMA Bot</h1>
-  <div class="updated">Last updated: {updated_at} UTC</div>
-  {halted_banner}
-  <div class="stats">
-    <div class="stat"><div class="label">Equity</div><div class="value">${equity:,.2f}</div></div>
-    <div class="stat"><div class="label">Today's PnL</div><div class="value {pnl_class}">{daily_pnl_pct:+.2%}</div></div>
-    <div class="stat"><div class="label">Total PnL</div><div class="value {total_pnl_class}">{total_pnl_display}</div></div>
-    <div class="stat"><div class="label">Drawdown from Peak</div><div class="value">{drawdown_pct:.2%}</div></div>
-    <div class="stat"><div class="label">Sharpe Ratio</div><div class="value">{sharpe_display}</div></div>
-    <div class="stat"><div class="label">Position</div><div class="value">{current_shares} sh</div></div>
-  </div>
-  <div class="card">
-    <h2>Equity vs. {symbol} Buy &amp; Hold</h2>
-    <div class="subhead">{chart_subhead}</div>
-    {equity_svg}
-  </div>
-  <div class="card">
-    <h2>Recent Activity</h2>
-    <div class="table-wrap">
-    <table>
-      <thead><tr><th>Time (UTC)</th><th>Signal</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr></thead>
-      <tbody>
-        {trade_rows}
-      </tbody>
-    </table>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="{portfolio_url}">James Laprocido</a>
+      <nav><a href="{portfolio_url}">Portfolio</a><a href="{repo_url}">GitHub</a></nav>
     </div>
-  </div>
+  </header>
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">Live paper trading</p>
+      <h1>{symbol} SMA Bot</h1>
+      <div class="actions">
+        <a class="btn" href="{portfolio_url}">&larr; Portfolio</a>
+        <a class="btn btn--line" href="{repo_url}">View code</a>
+      </div>
+      <p class="updated">Last updated: {updated_at} UTC</p>
+    </div>
+  </section>
+  <main>
+    <div class="wrap">
+      {halted_banner}
+      <div class="stats">
+        <div class="stat"><div class="label">Equity</div><div class="value">${equity:,.2f}</div></div>
+        <div class="stat"><div class="label">Today's PnL</div><div class="value {pnl_class}">{daily_pnl_pct:+.2%}</div></div>
+        <div class="stat"><div class="label">Total PnL</div><div class="value {total_pnl_class}">{total_pnl_display}</div></div>
+        <div class="stat"><div class="label">Drawdown from Peak</div><div class="value">{drawdown_pct:.2%}</div></div>
+        <div class="stat"><div class="label">Sharpe Ratio</div><div class="value">{sharpe_display}</div></div>
+        <div class="stat"><div class="label">Position</div><div class="value">{current_shares} sh</div></div>
+      </div>
+      <div class="card">
+        <h2>Equity vs. {symbol} Buy &amp; Hold</h2>
+        <div class="subhead">{chart_subhead}</div>
+        {equity_svg}
+      </div>
+      <div class="card">
+        <h2>Recent Activity</h2>
+        <div class="subhead">{trade_count} entries, newest first. Scroll for the full log.</div>
+        <div class="table-wrap">
+        <table>
+          <thead><tr><th>Date &amp; Time (UTC)</th><th>Signal</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Status</th></tr></thead>
+          <tbody>
+            {trade_rows}
+          </tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+  </main>
   <footer>
-    Paper trading via Alpaca. Not investment advice.<br>
-    This page reloads in your browser every 30 minutes, but the numbers only change when the bot
-    actually runs (see "Last updated" above) -- roughly hourly during market hours, less often outside it.
+    <div class="wrap">
+      Paper trading via Alpaca. Not investment advice.<br>
+      This page reloads in your browser every 30 minutes, but the numbers only change when the bot
+      actually runs (see "Last updated" above) -- roughly hourly during market hours, less often outside it.
+    </div>
   </footer>
 </body>
 </html>
@@ -116,7 +190,7 @@ def _nice_ticks(lo: float, hi: float, count: int = 5) -> list[float]:
 def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: list[float] | None,
                      width: int = 780, height: int = 240) -> str:
     if len(equity_values) < 2:
-        return "<p style='color:#8b949e'>Not enough history yet.</p>"
+        return "<p class='muted'>Not enough history yet.</p>"
 
     margin_left, margin_right, margin_top, margin_bottom = 65, 15, 15, 30
     plot_w = width - margin_left - margin_right
@@ -229,31 +303,52 @@ def build_benchmark_series(symbol: str, dates: list) -> list[float] | None:
     return [c / base for c in aligned_closes]
 
 
-def read_recent_trades(limit: int = 20) -> list[dict]:
+def read_all_trades() -> list[dict]:
+    # newest first; the table scrolls, so no row limit
     if not TRADE_LOG_PATH.exists():
         return []
     with open(TRADE_LOG_PATH, newline="") as f:
         rows = list(csv.DictReader(f))
-    return list(reversed(rows))[:limit]
+    return list(reversed(rows))
+
+
+def format_timestamp(raw: str) -> str:
+    # trade log stores ISO-8601 UTC, e.g. 2026-09-11T13:33:07.596362+00:00 -> 09-11-2026 13:33:07
+    try:
+        return dt.datetime.fromisoformat(raw).astimezone(dt.timezone.utc).strftime("%m-%d-%Y %H:%M:%S")
+    except ValueError:
+        return raw
+
+
+def format_status(raw: str) -> str:
+    # "max_drawdown_breach_18.00%" -> "Max Drawdown Breach 18.00%"
+    return raw.replace("_", " ").title()
 
 
 def build_trade_rows_html(trades: list[dict]) -> str:
     if not trades:
-        return '<tr><td colspan="6" style="color:#8b949e">No activity logged yet.</td></tr>'
+        return '<tr><td colspan="6" class="muted">No activity logged yet.</td></tr>'
 
+    signal_names = {"1": "Long", "0": "Flat"}
     rows = []
     for t in trades:
         side = (t.get("side") or "").lower()
-        side_class = "side-buy" if side == "buy" else ("side-sell" if side == "sell" else "")
-        price = t.get("filled_avg_price") or t.get("limit_price") or ""
+        side_class = "side-buy" if side == "buy" else ("side-sell" if side == "sell" else "muted")
+        raw_price = t.get("filled_avg_price") or t.get("limit_price") or ""
+        price = f"${float(raw_price):,.2f}" if raw_price else "&mdash;"
+        qty = t.get("qty") or ""
+        qty_display = html.escape(qty) if qty and qty != "0" else "&mdash;"
+        signal = signal_names.get(t.get("signal", ""), "&mdash;")
+        status = t.get("status", "")
+        status_class = "status-ok" if status == "filled" else ("status-bad" if "breach" in status or status == "halted" else "")
         rows.append(
             "<tr>"
-            f"<td>{html.escape(t.get('timestamp', ''))}</td>"
-            f"<td>{html.escape(t.get('signal', ''))}</td>"
-            f"<td class='{side_class}'>{html.escape(side.upper())}</td>"
-            f"<td>{html.escape(str(t.get('qty', '')))}</td>"
-            f"<td>{html.escape(str(price))}</td>"
-            f"<td>{html.escape(t.get('status', ''))}</td>"
+            f"<td>{html.escape(format_timestamp(t.get('timestamp', '')))}</td>"
+            f"<td>{signal}</td>"
+            f"<td class='{side_class}'>{html.escape(side.capitalize()) if side else '&mdash;'}</td>"
+            f"<td class='num'>{qty_display}</td>"
+            f"<td class='num'>{price}</td>"
+            f"<td class='{status_class}'>{html.escape(format_status(status))}</td>"
             "</tr>"
         )
     return "\n".join(rows)
@@ -282,6 +377,13 @@ def run() -> None:
     # chart and every metric derived from it (Sharpe, Total PnL below) use this same window,
     # so "how has the strategy done" never gets diluted by weeks of doing nothing first.
     all_dates, all_equity = rm.get_real_equity_history(trading_client)
+
+    # the history only has completed sessions -- add today's live equity as the last point so
+    # the chart ends on the same number as the Equity tile (skipped on weekends: no session)
+    today = dt.datetime.now(ZoneInfo("America/New_York")).date()  # session date, not UTC date
+    if today.weekday() < 5 and (not all_dates or all_dates[-1] < today):
+        all_dates, all_equity = all_dates + [today], all_equity + [equity]
+
     strategy_start = executor.find_strategy_start_date()
     if strategy_start:
         trimmed = [(d, e) for d, e in zip(all_dates, all_equity) if d >= strategy_start]
@@ -311,11 +413,13 @@ def run() -> None:
     equity_svg = build_chart_svg(dates, equity_series, benchmark_series)
     sharpe_ratio = compute_sharpe_ratio(equity_series)
 
-    trades = read_recent_trades()
+    trades = read_all_trades()
 
     html_out = PAGE_TEMPLATE.format(
         symbol=symbol,
-        updated_at=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        portfolio_url=PORTFOLIO_URL,
+        repo_url=REPO_URL,
+        updated_at=dt.datetime.now(dt.timezone.utc).strftime("%m-%d-%Y %H:%M:%S"),
         halted_banner=(
             '<div class="halted-banner">HALTED -- max drawdown previously breached, '
             "awaiting manual review</div>" if halted else ""
@@ -330,11 +434,12 @@ def run() -> None:
         current_shares=current_shares,
         chart_subhead=chart_subhead,
         equity_svg=equity_svg,
+        trade_count=len(trades),
         trade_rows=build_trade_rows_html(trades),
     )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUTPUT_DIR / "index.html").write_text(html_out)
+    (OUTPUT_DIR / "index.html").write_text(html_out, encoding="utf-8")
     print(f"Dashboard written to {OUTPUT_DIR / 'index.html'}")
 
 

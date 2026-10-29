@@ -44,8 +44,12 @@ def get_real_equity_history(trading_client: TradingClient) -> tuple[list, list]:
     history = trading_client.get_portfolio_history(
         GetPortfolioHistoryRequest(period="1A", timeframe="1D")
     )
+    # Alpaca stamps each daily point with the day AFTER its session (Mon's close comes back
+    # stamped Tue, Fri's stamped Sat), so shift back one day to get the real trading date --
+    # without this the curve lags a same-date price series (e.g. the buy-and-hold benchmark)
+    # by one trading day. Checked against AAPL daily returns: corr 0.86 shifted vs. -0.11 not.
     real_points = [
-        (dt.datetime.fromtimestamp(t, dt.timezone.utc).date(), e)
+        (dt.datetime.fromtimestamp(t, dt.timezone.utc).date() - dt.timedelta(days=1), e)
         for t, e in zip(history.timestamp, history.equity)  # type: ignore[reportAttributeAccessIssue]
         if e
     ]
