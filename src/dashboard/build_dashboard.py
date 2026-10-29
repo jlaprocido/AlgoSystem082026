@@ -283,7 +283,7 @@ def build_benchmark_series(symbol: str, dates: list) -> list[float] | None:
         print(f"Could not fetch benchmark data for {symbol}: {e}")
         return None
 
-    closes_by_date = {row.timestamp.date(): row.close for row in df.itertuples()}
+    closes_by_date = {row.timestamp.date(): row.close for row in df.itertuples()}  # type: ignore[reportAttributeAccessIssue]
 
     last_close = None
     aligned_closes = []
@@ -392,9 +392,8 @@ def run() -> None:
     else:
         dates, equity_series = all_dates, all_equity
 
-    total_pnl_pct = total_pnl_dollars = None
+    total_pnl_pct = None
     if len(equity_series) >= 1:
-        total_pnl_dollars = equity - equity_series[0]
         total_pnl_pct = equity / equity_series[0] - 1
 
     if len(dates) >= 2:
