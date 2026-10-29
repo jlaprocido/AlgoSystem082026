@@ -8,7 +8,7 @@ from src.strategy import aapl_sma
 from src.trading import executor
 
 MAX_DRAWDOWN_PCT = 0.15  # from peak account equity -- breach requires manual risk_manager.clear_halt()
-MAX_DAILY_LOSS_PCT = 0.05  # from yesterday's close -- self-clears the next trading day
+MAX_DAILY_LOSS_PCT = 0.025  # from yesterday's close -- self-clears the next trading day
 STRATEGY_NAME = "sma"
 
 
