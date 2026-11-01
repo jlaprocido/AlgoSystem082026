@@ -142,7 +142,7 @@ The first strategy graduated from `tests/sma/` into live (currently **paper**) e
 
 **Risk controls** (`src/risk/risk_manager.py`):
 - **Max drawdown kill switch**: flattens the position and writes `data/risk/halt_state.json`, which blocks every future run until `risk_manager.clear_halt()` is called manually after reviewing what happened — deliberately does not auto-resume, since a large drawdown should get a human's attention, not just time passing.
-- **Daily loss limit**: flattens for the rest of *that calendar day only*, then clears itself automatically the next trading day — a single bad day is normal variance in a way a large drawdown isn't.
+- **Daily move limits** (measured on AAPL's own drop from yesterday's close, not on leveraged equity): down 2.5% cuts the position to 1x; down 5% flattens it. Either one holds for the rest of *that calendar day only*, then clears itself automatically the next trading day (run_daily re-levers to 2x) — a single bad day is normal variance in a way a large drawdown isn't.
 - **Market-hours check**, so it never trades against stale after-hours quotes.
 - Both breach checks live in `run_daily.py`'s `check_risk_limits()`, shared with `intraday_check.py` rather than duplicated — see "Leverage" below for why a second, more frequent caller of this same function exists at all.
 

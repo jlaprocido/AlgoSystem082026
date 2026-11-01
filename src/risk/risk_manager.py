@@ -58,15 +58,16 @@ def get_real_equity_history(trading_client: TradingClient) -> tuple[list, list]:
     return dates, equity
 
 
-def check_daily_loss(trading_client: TradingClient, max_daily_loss_pct: float) -> tuple[bool, float]:
-    account = trading_client.get_account()
-    equity = float(account.equity)  # type: ignore[reportAttributeAccessIssue]
-    last_equity = float(account.last_equity)  # type: ignore[reportAttributeAccessIssue]
-    if last_equity <= 0:
-        return False, 0.0
-
-    pnl_pct = (equity - last_equity) / last_equity
-    return pnl_pct <= -max_daily_loss_pct, pnl_pct
+def get_position_move_today(trading_client: TradingClient, symbol: str) -> float:
+    # the held position's % change since yesterday's close, i.e. the stock's own move
+    # (unlevered) -- 0.0 when flat, since there is nothing at risk to react to
+    try:
+        position = trading_client.get_open_position(symbol)
+    except APIError as e:
+        if e.code == NO_POSITION_ERROR_CODE:
+            return 0.0
+        raise
+    return float(position.unrealized_intraday_plpc)  # type: ignore[reportAttributeAccessIssue]
 
 
 def is_halted() -> bool:
@@ -89,21 +90,21 @@ def clear_halt() -> None:
         HALT_STATE_PATH.unlink()
 
 
-def is_daily_loss_handled_today() -> bool:
+def get_daily_loss_level() -> str | None:
     # daily-loss breaches self-clear the next trading day (unlike the drawdown halt), but
     # within the *same* day this needs its own memory: intraday_check.py can call
-    # check_risk_limits() several times before the day rolls over, and without this a loss
-    # that's still breached on the next check would flatten (harmlessly, already flat) and
-    # re-notify every single time -- several duplicate "daily loss breached" texts on the one
-    # day this actually matters most
+    # check_risk_limits() several times before the day rolls over, and without this a move
+    # that's still breached on the next check would act and re-notify every single time.
+    # Returns what was already done today ("reduced" or "flattened"), or None.
     if not DAILY_LOSS_STATE_PATH.exists():
-        return False
-    return json.loads(DAILY_LOSS_STATE_PATH.read_text()).get("handled_date") == dt.date.today().isoformat()
+        return None
+    state = json.loads(DAILY_LOSS_STATE_PATH.read_text())
+    return state.get("level") if state.get("handled_date") == dt.date.today().isoformat() else None
 
 
-def mark_daily_loss_handled_today() -> None:
+def set_daily_loss_level(level: str) -> None:
     DAILY_LOSS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DAILY_LOSS_STATE_PATH.write_text(json.dumps({"handled_date": dt.date.today().isoformat()}))
+    DAILY_LOSS_STATE_PATH.write_text(json.dumps({"handled_date": dt.date.today().isoformat(), "level": level}))
 
 
 def flatten_position(trading_client: TradingClient, symbol: str) -> None:

@@ -8,7 +8,9 @@ from src.strategy import aapl_sma
 from src.trading import executor
 
 MAX_DRAWDOWN_PCT = 0.15  # from peak account equity -- breach requires manual risk_manager.clear_halt()
-MAX_DAILY_LOSS_PCT = 0.025  # from yesterday's close -- self-clears the next trading day
+# AAPL's own drop from yesterday's close (unlevered) -- both self-clear the next trading day
+REDUCE_MOVE_PCT = 0.025   # cut the position to 1x
+FLATTEN_MOVE_PCT = 0.05   # sell everything
 STRATEGY_NAME = "sma"
 
 
@@ -39,20 +41,50 @@ def check_risk_limits(trading_client, symbol: str) -> bool:
         notify(f"{symbol} bot: MAX DRAWDOWN BREACH ({drawdown_pct:.2%}) -- position flattened, bot halted until manually cleared.")
         return False
 
-    loss_breached, daily_pnl_pct = rm.check_daily_loss(trading_client, MAX_DAILY_LOSS_PCT)
-    if loss_breached:
-        if rm.is_daily_loss_handled_today():
-            print(f"Daily loss limit still breached ({daily_pnl_pct:.2%}) -- already flattened/notified today, staying quiet.")
-            return False
+    level = rm.get_daily_loss_level()
+    if level == "flattened":
+        print("Already flattened for today's move -- staying quiet.")
+        return False
 
-        print(f"Daily loss limit breached ({daily_pnl_pct:.2%} <= -{MAX_DAILY_LOSS_PCT:.2%}) -- flattening for today only.")
+    move_pct = rm.get_position_move_today(trading_client, symbol)
+    if move_pct <= -FLATTEN_MOVE_PCT:
+        print(f"{symbol} down {move_pct:.2%} today (limit -{FLATTEN_MOVE_PCT:.2%}) -- flattening for today only.")
         rm.flatten_position(trading_client, symbol)
-        rm.mark_daily_loss_handled_today()
-        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_breach_{daily_pnl_pct:.2%}")
-        notify(f"{symbol} bot: daily loss limit breached ({daily_pnl_pct:.2%}) -- position flattened for today, resumes next trading day.")
+        rm.set_daily_loss_level("flattened")
+        executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_flatten_{move_pct:.2%}")
+        notify(f"{symbol} bot: {symbol} down {move_pct:.2%} today -- position flattened for today, resumes next trading day.")
+        return False
+
+    if level == "reduced":
+        print("Already cut to 1x for today's move -- staying quiet.")
+        return False
+
+    if move_pct <= -REDUCE_MOVE_PCT:
+        reduce_to_1x(trading_client, symbol, move_pct)
         return False
 
     return True
+
+
+def reduce_to_1x(trading_client, symbol: str, move_pct: float) -> None:
+    print(f"{symbol} down {move_pct:.2%} today (limit -{REDUCE_MOVE_PCT:.2%}) -- cutting to 1x for today only.")
+    data_client = get_alpaca_client()
+    current_shares = executor.get_current_shares(trading_client, symbol)
+    target_shares = executor.get_target_shares(trading_client, data_client, symbol, 1, aapl_sma.TARGET_ALLOCATION_PCT, 1.0)
+
+    order = None
+    if target_shares < current_shares:  # only ever sells down, never adds
+        order = executor.submit_rebalance_order(
+            trading_client, data_client, symbol, STRATEGY_NAME, 1, target_shares, current_shares, id_suffix="reduce"
+        )
+        if order is not None:
+            order = executor.reconcile_fill(trading_client, order.id)
+
+    rm.set_daily_loss_level("reduced")
+    executor.log_trade(None, symbol, STRATEGY_NAME, None, note=f"daily_loss_reduce_{move_pct:.2%}")
+    if order is not None:
+        executor.log_trade(order, symbol, STRATEGY_NAME, 1)
+    notify(f"{symbol} bot: {symbol} down {move_pct:.2%} today -- cut from {current_shares} to {target_shares} shares (1x), re-levers next trading day.")
 
 
 def run() -> None:

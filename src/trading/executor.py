@@ -89,7 +89,7 @@ def get_current_shares(trading_client: TradingClient, symbol: str) -> int:
 
 def submit_rebalance_order(trading_client: TradingClient, data_client: StockHistoricalDataClient,
                             symbol: str, strategy: str, signal: int,
-                            target_shares: int, current_shares: int) -> Order | None:
+                            target_shares: int, current_shares: int, id_suffix: str = "") -> Order | None:
     delta = target_shares - current_shares
     if delta == 0:
         return None
@@ -102,7 +102,9 @@ def submit_rebalance_order(trading_client: TradingClient, data_client: StockHist
     # while still capping the worst-case execution price against a bad print at the open
     limit_price = round(quote.ask_price * 1.001, 2) if side == OrderSide.BUY else round(quote.bid_price * 0.999, 2)
 
-    client_order_id = f"{symbol}-{strategy}-{dt.date.today().isoformat()}"
+    # id_suffix lets a same-day risk cut coexist with the morning's rebalance order, which
+    # would otherwise collide on this id and be silently skipped as a "duplicate"
+    client_order_id = f"{symbol}-{strategy}-{dt.date.today().isoformat()}" + (f"-{id_suffix}" if id_suffix else "")
     request = LimitOrderRequest(
         symbol=symbol, qty=qty, side=side, type="limit",
         time_in_force=TimeInForce.DAY, limit_price=limit_price,
