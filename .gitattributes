@@ -7,3 +7,7 @@
 # `git config merge.union.driver "git merge-file --union %A %O %B"` before rebasing/merging --
 # see the "Persist trade log / risk state" step in .github/workflows/*.yml.
 data/orders/trade_log.csv merge=union
+
+# shell scripts run on the Linux VM -- CRLF line endings would break them
+*.sh text eol=lf
+deploy/crontab.txt text eol=lf

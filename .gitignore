@@ -120,3 +120,7 @@ tokens/
 # Uncomment if you want to track installed packages
 # pip-log.txt
 # pip-delete-this-directory.txt
+
+# VM runtime files (deploy/run.sh)
+logs/
+.run.lock

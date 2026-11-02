@@ -1,0 +1,58 @@
+name: Publish Dashboard
+
+# The VM trades and pushes the trade log / risk state to main (deploy/run.sh); this rebuilds and
+# publishes the static page whenever that state or the dashboard code changes. The hourly
+# schedule only refreshes the live equity point on quiet days -- it's fine if GitHub runs it
+# late, since nothing trades from here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "data/orders/trade_log.csv"
+      - "data/risk/**"
+      - "src/dashboard/**"
+  schedule:
+    - cron: "15 14-21 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "dashboard-pages"
+  cancel-in-progress: false
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Build dashboard
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+        run: python -m src.dashboard.build_dashboard
+
+      - uses: actions/configure-pages@v6.0.0
+
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: public
+
+      - uses: actions/deploy-pages@v5.0.1
+        id: deployment
