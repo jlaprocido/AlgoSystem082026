@@ -1,11 +1,8 @@
 name: EOD Summary
 
-# 4:00pm America/Chicago (21:00 UTC in CDT -- see run_daily.yml for the DST caveat). The
-# same-day dedup guard in eod_summary.py stays as a safety net against a manual workflow_dispatch
-# on top of the real scheduled run.
+# Triggered by cron-job.org calling workflow_dispatch at 4:00pm America/Chicago. The same-day
+# dedup guard in eod_summary.py stays as a safety net against a duplicate dispatch.
 on:
-  schedule:
-    - cron: "0 21 * * 1-5"
   workflow_dispatch: {}
 
 permissions:

@@ -158,9 +158,9 @@ The first strategy graduated from `tests/sma/` into live (currently **paper**) e
 
 ## Automation (GitHub Actions)
 
-Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `intraday_check.yml`) schedule the three entrypoints above, each also runnable on demand via `workflow_dispatch`. Requires three repo secrets: `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `NTFY_TOPIC`.
+Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `intraday_check.yml`) run the three entrypoints above, each started via `workflow_dispatch` (by cron-job.org, or by hand). Requires three repo secrets: `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `NTFY_TOPIC`.
 
-**Scheduling, kept simple**: each workflow's `cron:` is a single fixed UTC time targeting its America/Chicago run time directly — no in-Python time-window gating. GitHub's `schedule:` trigger is UTC-only and doesn't follow DST, so these crons are only exactly right for one DST state at a time (currently CDT, UTC-5) and need a manual one-line shift twice a year (see the comment at the top of each workflow file for the CST equivalent). GitHub Actions' scheduled triggers are also documented as best-effort and can run late, especially on lower-activity repos — that's an accepted limitation for now rather than something worked around in code, since a VM move would be the real fix and would use a real local-time system cron instead. Current targets: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 4:00pm, all America/Chicago.
+**Scheduling**: the workflows have no `cron:` of their own. GitHub's `schedule:` trigger is best-effort and UTC-only: logged `run_daily` runs landed 3-7 hours after target and about 29% found the market already closed. Instead, [cron-job.org](https://cron-job.org) calls each workflow's `workflow_dispatch` endpoint (a fine-grained token limited to this repo with Actions write) at the right America/Chicago time, so DST is handled on its side. Targets: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 4:00pm. The same-day order ID (`AAPL-sma-<date>`) and `eod_summary`'s dedup guard protect against a duplicate dispatch.
 
 **Concurrency groups are per-repo, not per-workflow**: all three workflows initially shared the literal `concurrency: group: "pages"`, copied from GitHub's official single-workflow Pages template without realizing concurrency groups are shared *repo-wide* across every workflow file using the same name, not scoped to the file that declares it. With `cancel-in-progress: false`, GitHub keeps only one additional run queued per group and drops older superseded ones — so all three workflows were needlessly serialized against each other, silently dropping most of `intraday_check`'s hourly triggers and cascading multi-hour delays into the other two. Each workflow now has its own distinct group (`run-daily-pages`, `eod-summary-pages`, `intraday-check-pages`).
 
@@ -178,8 +178,8 @@ It's a **build step, not a server**: every one of the three workflows (`run_dail
 
 **One manual step required** (can't be done via a file change): in the repo's Settings → Pages, set **Source** to **"GitHub Actions"** (not the older branch-based option) — this is what makes the `actions/deploy-pages` step have somewhere to publish to. After that, the workflows handle everything else.
 
-## Next Steps: Cloud VM
+## Next Steps
 
-A VM was written and then dropped: the scheduled runs turned out reliable enough on their current setup, so no VM is needed. Revisit only if intraday strategies need tighter timing.
+Scheduling is solved (see "Automation"). A VM was written and then dropped as unnecessary. Revisit only if intraday strategies need tighter timing.
 
 One thing to watch if research/backtest scripts ever run at scale on a VM: yfinance is occasionally rate-limited from datacenter IP ranges (see "Data Sources" above). Not expected to matter for the live AAPL SMA path itself, since its daily data pull already routes through Alpaca.

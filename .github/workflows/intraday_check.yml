@@ -1,15 +1,12 @@
 name: Intraday Risk Check
 
-# Hourly, on the hour, 10am-3pm America/Chicago (15:00-20:00 UTC in CDT -- see run_daily.yml
-# for the DST caveat and why we're not building that out here with a VM move coming soon).
+# Triggered by cron-job.org calling workflow_dispatch hourly, 10am-3pm America/Chicago.
 #
 # This is the fast circuit breaker for a leveraged position: it never opens a new position or
 # changes the strategy's target, it only checks the existing drawdown/daily-loss limits and
 # flattens if breached -- see aapl_sma.LEVERAGE_MULTIPLIER and README's "Leverage" section for
 # why run_daily.py's once-a-day cadence alone isn't fast enough once leverage is in play.
 on:
-  schedule:
-    - cron: "0 15-20 * * 1-5"
   workflow_dispatch: {}
 
 permissions:
