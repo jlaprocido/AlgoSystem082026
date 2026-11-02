@@ -1,6 +1,6 @@
 name: Publish Dashboard
 
-# The VM trades and pushes the trade log / risk state to main (deploy/run.sh); this rebuilds and
+# The VM trades and pushes the trade log / risk state to main; this rebuilds and
 # publishes the static page whenever that state or the dashboard code changes. The hourly
 # schedule only refreshes the live equity point on quiet days -- it's fine if GitHub runs it
 # late, since nothing trades from here.

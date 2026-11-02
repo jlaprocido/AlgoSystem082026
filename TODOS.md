@@ -10,7 +10,7 @@
 
 **Cons:** An outside scheduler adds a repo-scoped token and a schedule that lives outside the repo; a VM adds server upkeep.
 
-**Context:** Option A (outside scheduler): fine-grained GitHub token limited to this repo with Actions write, one HTTP POST per trading day to the workflow dispatch endpoint. The same-day order ID (`AAPL-sma-YYYY-MM-DD`) already blocks duplicate orders. Option B (VM) matches the VM move already mentioned in the workflow comments. Decided 2026-11-01 in /plan-ceo-review: deferred, not rejected. Update 2026-11-01: option B chosen -- deploy/ scripts and dashboard.yml are written; remaining manual steps (create the VM, deploy key, cutover) are in README "Deployment (always-on VM)".
+**Context:** Option A (outside scheduler): fine-grained GitHub token limited to this repo with Actions write, one HTTP POST per trading day to the workflow dispatch endpoint. The same-day order ID (`AAPL-sma-YYYY-MM-DD`) already blocks duplicate orders. Option B (VM) matches the VM move already mentioned in the workflow comments. Decided 2026-11-01 in /plan-ceo-review: deferred, not rejected.
 
 **Effort:** A: human ~1h / CC ~15min (S). B: human ~1 day / CC ~1h (L).
 

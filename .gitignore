@@ -121,6 +121,3 @@ tokens/
 # pip-log.txt
 # pip-delete-this-directory.txt
 
-# VM runtime files (deploy/run.sh)
-logs/
-.run.lock

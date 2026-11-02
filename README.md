@@ -160,7 +160,7 @@ The first strategy graduated from `tests/sma/` into live (currently **paper**) e
 
 Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `intraday_check.yml`) schedule the three entrypoints above, each also runnable on demand via `workflow_dispatch`. Requires three repo secrets: `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `NTFY_TOPIC`.
 
-**Scheduling, kept simple**: each workflow's `cron:` is a single fixed UTC time targeting its America/Chicago run time directly — no in-Python time-window gating. GitHub's `schedule:` trigger is UTC-only and doesn't follow DST, so these crons are only exactly right for one DST state at a time (currently CDT, UTC-5) and need a manual one-line shift twice a year (see the comment at the top of each workflow file for the CST equivalent). GitHub Actions' scheduled triggers are also documented as best-effort and can run late, especially on lower-activity repos — that's an accepted limitation for now rather than something worked around in code, since the VM move (see "Deployment" below) is the actual fix and uses a real local-time system cron instead. Current targets: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 4:00pm, all America/Chicago.
+**Scheduling, kept simple**: each workflow's `cron:` is a single fixed UTC time targeting its America/Chicago run time directly — no in-Python time-window gating. GitHub's `schedule:` trigger is UTC-only and doesn't follow DST, so these crons are only exactly right for one DST state at a time (currently CDT, UTC-5) and need a manual one-line shift twice a year (see the comment at the top of each workflow file for the CST equivalent). GitHub Actions' scheduled triggers are also documented as best-effort and can run late, especially on lower-activity repos — that's an accepted limitation for now rather than something worked around in code, since a VM move would be the real fix and would use a real local-time system cron instead. Current targets: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 4:00pm, all America/Chicago.
 
 **Concurrency groups are per-repo, not per-workflow**: all three workflows initially shared the literal `concurrency: group: "pages"`, copied from GitHub's official single-workflow Pages template without realizing concurrency groups are shared *repo-wide* across every workflow file using the same name, not scoped to the file that declares it. With `cancel-in-progress: false`, GitHub keeps only one additional run queued per group and drops older superseded ones — so all three workflows were needlessly serialized against each other, silently dropping most of `intraday_check`'s hourly triggers and cascading multi-hour delays into the other two. Each workflow now has its own distinct group (`run-daily-pages`, `eod-summary-pages`, `intraday-check-pages`).
 
@@ -178,39 +178,8 @@ It's a **build step, not a server**: every one of the three workflows (`run_dail
 
 **One manual step required** (can't be done via a file change): in the repo's Settings → Pages, set **Source** to **"GitHub Actions"** (not the older branch-based option) — this is what makes the `actions/deploy-pages` step have somewhere to publish to. After that, the workflows handle everything else.
 
-## Deployment (always-on VM)
+## Next Steps: Cloud VM
 
-GitHub's `schedule:` trigger is best-effort: logged `run_daily` runs landed 3-7 hours after their 14:45 UTC target, and about 29% of them (10 of 34) found the market already closed and did nothing. Adding more cron lines doesn't help because they all use the same scheduler, so the bot moves to a small VM with a real system cron. The trading code itself is unchanged; only the scheduling layer moves.
-
-```
-VM (Ubuntu 24.04, timezone America/New_York)
-  cron --> deploy/run.sh <run_daily|intraday_check|eod_summary>
-             |-- flock           one job at a time
-             |-- git pull        picks up code you pushed from your own machine
-             |-- python -m src.trading.<job>
-             |-- ntfy alert      if the job crashed
-             `-- git commit + push   trade log / risk state (deploy key)
-                                       |
-GitHub                                 v
-  push to main --> .github/workflows/dashboard.yml --> GitHub Pages (jameslaprocido.com stays separate)
-```
-
-- `deploy/run.sh` runs one entrypoint, alerts you if it crashes, and persists state the same way the old workflows did (same union-merge driver, same retry loop). Its commit message has no `[skip ci]`, because the push is what triggers the dashboard rebuild.
-- `deploy/crontab.txt` is in New York time: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 5:00pm. System cron follows DST by itself, so the twice-a-year manual shift is gone.
-- `.github/workflows/dashboard.yml` only builds and publishes the page. It runs on pushes that touch the trade log, risk state or dashboard code, plus an hourly weekday refresh so the live equity point stays current on quiet days.
-- Because `run.sh` does a `git pull` first, pushing to `main` deploys to the VM on its next job. Keep that in mind before pushing a half-finished change.
-
-**One-time VM setup** (about an hour, mostly account creation):
-
-1. Create a small VM (1 vCPU / 1 GB is plenty) with **Ubuntu 24.04** at DigitalOcean, Hetzner or Vultr, adding your SSH public key during creation. Log in with `ssh root@<ip>`, then create a normal user (`adduser algo`, `usermod -aG sudo algo`, copy `~/.ssh/authorized_keys` to it) and log in as that user from now on. Enable the provider's firewall allowing only SSH (port 22).
-2. On the VM, make a deploy key: `ssh-keygen -t ed25519 -f ~/.ssh/algosystem_deploy -N ""`, then `cat ~/.ssh/algosystem_deploy.pub` and add it in the GitHub repo under Settings → Deploy keys with **Allow write access** checked. Tell git to use it: `git config --global core.sshCommand "ssh -i ~/.ssh/algosystem_deploy -o IdentitiesOnly=yes"`.
-3. `git clone git@github.com:jlaprocido/AlgoSystem082026.git && cd AlgoSystem082026`
-4. `cp .env.example .env`, edit it with the Alpaca keys and `NTFY_TOPIC` (same values as the repo secrets).
-5. `deploy/setup.sh`. It sets the timezone, installs Python and cron, builds the virtualenv, and installs the crontab.
-6. Test by hand while the market is open: `deploy/run.sh intraday_check`. This only checks risk limits. Then check `logs/cron.log` and that a state commit (if any) shows up on GitHub.
-
-**Cutover** (do this only after step 6 works, so you never run two bots): disable or delete `run_daily.yml`, `intraday_check.yml` and `eod_summary.yml` in `.github/workflows/`, and keep `dashboard.yml`. Per-day order IDs (`AAPL-sma-<date>`) already block a duplicate buy if both ever run on the same day, but don't rely on that. Repo secrets `ALPACA_API_KEY` and `ALPACA_API_SECRET` are still needed by the dashboard workflow; `NTFY_TOPIC` is no longer.
-
-**Upkeep:** `sudo apt update && sudo apt upgrade` monthly (or enable `unattended-upgrades`), keep SSH key-only (`PasswordAuthentication no` in `/etc/ssh/sshd_config`), and if a day goes quiet check `logs/cron.log` first. Logs are append-only; trim them occasionally.
+A VM was written and then dropped: the scheduled runs turned out reliable enough on their current setup, so no VM is needed. Revisit only if intraday strategies need tighter timing.
 
 One thing to watch if research/backtest scripts ever run at scale on a VM: yfinance is occasionally rate-limited from datacenter IP ranges (see "Data Sources" above). Not expected to matter for the live AAPL SMA path itself, since its daily data pull already routes through Alpaca.
