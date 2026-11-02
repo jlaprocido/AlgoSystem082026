@@ -11,6 +11,7 @@ MAX_DRAWDOWN_PCT = 0.15  # from peak account equity -- breach requires manual ri
 # AAPL's own drop from yesterday's close (unlevered) -- both self-clear the next trading day
 REDUCE_MOVE_PCT = 0.025   # cut the position to 1x
 FLATTEN_MOVE_PCT = 0.05   # sell everything
+REBALANCE_BAND_PCT = 0.05  # skip rebalances smaller than this fraction of the target position
 STRATEGY_NAME = "sma"
 
 
@@ -129,7 +130,13 @@ def run() -> None:
     # compare share counts, not just long/flat direction -- otherwise a leveraged position
     # holding *any* shares in the right direction never re-trues up to the current target
     # (e.g. after equity growth), since direction alone never changes while staying long
-    if target_shares == current_shares:
+    # a rebalance band: while staying long, ignore small drifts (e.g. 1-2 shares as equity moves)
+    # -- opening or closing a position (either side zero) always trades
+    within_band = (
+        current_shares > 0 and target_shares > 0
+        and abs(target_shares - current_shares) / target_shares < REBALANCE_BAND_PCT
+    )
+    if target_shares == current_shares or within_band:
         print(f"Target unchanged ({target_shares} shares, {'long' if signal else 'flat'}) -- no trade needed.")
         executor.log_trade(None, symbol, STRATEGY_NAME, signal, note="signal_unchanged")
         notify(f"{symbol} bot: daily check-in -- signal {'long' if signal else 'flat'}, holding {current_shares} shares, no trade needed.")

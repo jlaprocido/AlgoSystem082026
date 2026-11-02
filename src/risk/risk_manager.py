@@ -29,8 +29,10 @@ def check_max_drawdown(trading_client: TradingClient, max_drawdown_pct: float) -
     if not equity:
         return False, 0.0
 
-    peak = max(equity)
-    current = equity[-1]
+    # the history's last point is a session old (it's stamped a day late), so a drop today
+    # wouldn't register until tomorrow -- compare the live account equity against the peak instead
+    current = float(trading_client.get_account().equity)  # type: ignore[reportAttributeAccessIssue]
+    peak = max(max(equity), current)
     drawdown_pct = (peak - current) / peak if peak > 0 else 0.0
     return drawdown_pct >= max_drawdown_pct, drawdown_pct
 
