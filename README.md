@@ -31,6 +31,7 @@ src/
     market_data.py      # get_bars(): unified yfinance/Alpaca data fetcher, same output shape either way
   backtest/
     costs.py            # apply_slippage(): shared trading-cost model, used by every strategy backtest
+    portfolio.py        # multi-asset harness: load aligned bars, weights table -> net daily returns, summary stats
   strategy/
     aapl_sma.py            # the live, chosen version of tests/sma/sma.py's crossover for AAPL --
                             # given today's bars, what's today's position? (no backtest/optimizer code)
@@ -89,6 +90,8 @@ tests/                  # NOTE: this is a strategy research/prototyping area, no
   volume_spike/
     volume_spike.py               # volume-spike momentum: long after an unusually large, up-close volume bar
     insample_volume_spike_mcpt.py # permutation test for the volume-spike in-sample result (volume-aware permutation)
+  dual_momentum/
+    dual_momentum.py              # monthly rotation into the strongest of SPY/EFA/TLT/GLD, or cash (uses src/backtest/portfolio.py)
   vol_regime/
     vol_regime.py                 # Donchian breakout gated to only fire when ATR is expanding vs. its own baseline
     insample_vol_regime_mcpt.py   # permutation test for the vol-regime in-sample result

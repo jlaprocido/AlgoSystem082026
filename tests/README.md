@@ -40,6 +40,9 @@ Despite the folder name, this isn't a `pytest` unit-test suite — it's where tr
   - `vol_regime.py` — `true_range()`, `vol_regime_strategy()`, `optimize_vol_regime_strategy()`, `walkforward_vol_regime()`.
   - `insample_vol_regime_mcpt.py` — MCPT against the in-sample result. Uses only OHLC, so the plain (non-volume) permutation is fine here.
 
+- **`dual_momentum/`** — the first *multi-asset* strategy: each month hold whichever of SPY / EFA / TLT / GLD has the best trailing return, or cash if that return isn't positive.
+  - `dual_momentum.py` — `dual_momentum_weights()` (returns a weights table, not a 0/1 signal) and a `__main__` that prints Sharpe / CAGR / max drawdown for 3-12 month lookbacks next to buy & hold of each asset and an equal-weight basket. Built on `src/backtest/portfolio.py`, the multi-asset harness (weights table in, net daily returns out, same slippage rate as `costs.py`). No walk-forward or MCPT yet: with only four lookbacks the printed table shows parameter sensitivity directly.
+
 ## A note on data ranges
 
 Several `__main__` blocks and MCPT scripts hardcode specific start dates (e.g. `2020, 8, 1` for intraday intervals, `2016, 1, 1` for daily). These aren't arbitrary — see the "Data Sources" section in the root `README.md`: `get_bars()` picks its source from `interval` *and* `start` together — Alpaca whenever the whole requested range is on/after 2020-07-27 (any interval), yfinance otherwise (needed for daily+ history predating that). Alpaca's free IEX feed has no history before 2020-07-27 at all, so `get_bars` raises immediately if you ask for an earlier *intraday* start rather than letting it silently truncate (daily+ requests before that date just route to yfinance instead, no guard needed). Copying a script to test a different date range mainly matters for intraday intervals: that start still needs to clear the 2020-07-27 floor.
