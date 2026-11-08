@@ -127,3 +127,54 @@ def test_stock_card_shows_whole_shares_and_leverage():
 def test_small_sleeve_chart_uses_cents_on_the_axis():
     svg = bd.build_chart_svg([D(2026, 11, 2), D(2026, 11, 3)], [1000.0, 1004.5], [1000.0, 1001.0])
     assert "$1,004.50" in svg or "$1,004.5" in svg
+
+
+# --- two accounts on the page ---
+
+def fake_account(name, equity, last_equity, fills=None, halted=False, positions=None):
+    days = [D(2026, 11, d) for d in (2, 3, 4, 5)]
+    return {"name": name, "equity": equity, "last_equity": last_equity, "positions": positions or {},
+            "drawdown_pct": 0.05, "halted": halted, "dates": days,
+            "equity_hist": [100_000.0, 100_500.0, 101_000.0, equity], "fills": fills or {}}
+
+
+def test_account_section_shows_its_own_benchmark_and_title(monkeypatch):
+    monkeypatch.setattr(bd, "build_benchmark_series", lambda sym, dates: [1.0, 1.01, 1.02, 1.03])
+    html, start_equity, now = bd.build_account_section(fake_account("crypto", 101_500.0, 101_000.0))
+    assert "Crypto account" in html and "BTC Buy &amp; Hold" in html and "SPY" not in html
+    assert (start_equity, now) == (100_000.0, 101_500.0)
+
+
+def test_stock_account_is_compared_with_spy(monkeypatch):
+    monkeypatch.setattr(bd, "build_benchmark_series", lambda sym, dates: [1.0, 1.0, 1.0, 1.0])
+    html, _, _ = bd.build_account_section(fake_account("stock", 100_000.0, 100_000.0))
+    assert "Stock account" in html and "SPY Buy &amp; Hold" in html
+
+
+def test_halted_banner_names_the_account(monkeypatch):
+    monkeypatch.setattr(bd, "build_benchmark_series", lambda sym, dates: None)
+    html, _, _ = bd.build_account_section(fake_account("crypto", 90_000.0, 91_000.0, halted=True))
+    assert "HALTED" in html and "crypto account" in html
+
+
+def test_window_starts_at_the_accounts_first_fill_not_at_funding(monkeypatch):
+    monkeypatch.setattr(bd, "build_benchmark_series", lambda sym, dates: [1.0] * len(dates))
+    fills = {"btc_sma": [{"date": D(2026, 11, 4), "symbol": "BTC/USD", "side": "buy", "qty": 1.0, "price": 1.0}]}
+    html, start_equity, _ = bd.build_account_section(fake_account("crypto", 101_500.0, 101_000.0, fills))
+    assert start_equity == 101_000.0 and "Nov 04, 2026" in html
+
+
+def test_only_the_stock_client_is_built_without_crypto_keys(monkeypatch):
+    monkeypatch.setattr(bd, "get_alpaca_trading_client", lambda: "STOCK")
+    monkeypatch.setattr(bd, "crypto_account_configured", lambda: False)
+    assert bd.get_clients() == {"stock": "STOCK"}
+    monkeypatch.setattr(bd, "crypto_account_configured", lambda: True)
+    monkeypatch.setattr(bd, "get_alpaca_crypto_trading_client", lambda: "CRYPTO")
+    assert bd.get_clients() == {"stock": "STOCK", "crypto": "CRYPTO"}
+
+
+def test_orders_are_matched_per_account(monkeypatch):
+    o_btc, o_aapl = order("BTC/USD", "buy", 0.01, 70000, 3), order("AAPL", "buy", 10, 300, 3)
+    client = SimpleNamespace(get_orders=lambda req: [o_btc, o_aapl])
+    assert set(bd.fetch_fills(client, "crypto")) == {"btc_sma"}      # AAPL is not a crypto-account symbol
+    assert set(bd.fetch_fills(client, "stock")) == {"aapl_sma"}

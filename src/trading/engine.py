@@ -12,7 +12,6 @@ import datetime as dt
 import pandas as pd
 
 from src.assets import INTERVAL_SECONDS
-from src.config import get_alpaca_trading_client
 from src.notifications import notifier
 from src.risk import risk_manager as rm
 from src.strategy.registry import Strategy, get_strategy
@@ -30,6 +29,11 @@ def notify(message: str) -> None:
         notifier.send_notification(message)
     except Exception as e:
         print(f"Notification failed (non-fatal): {e}")
+
+
+def get_trading_client(strategy: Strategy):
+    """The Alpaca account this strategy trades in: stocks and crypto are separate accounts."""
+    return strategy.asset.trading_client()
 
 
 def label(strategy: Strategy) -> str:
@@ -73,14 +77,14 @@ def check_risk_limits(trading_client, strategy: Strategy) -> bool:
     asset = strategy.asset
     first = strategy.symbols[0]
 
-    # GLOBAL: account drawdown flattens every strategy and halts until a human clears it
+    # PER ACCOUNT: this account's drawdown flattens every strategy in it and halts until a human clears it
     dd_breached, drawdown_pct = rm.check_max_drawdown(trading_client, MAX_DRAWDOWN_PCT)
     if dd_breached:
-        print(f"Max drawdown breached ({drawdown_pct:.2%} >= {MAX_DRAWDOWN_PCT:.2%}) -- flattening ALL and halting.")
+        print(f"Max drawdown breached ({drawdown_pct:.2%} >= {MAX_DRAWDOWN_PCT:.2%}) -- flattening the {asset.name} account and halting it.")
         rm.flatten_all(trading_client)
-        rm.set_halted(f"Max drawdown {drawdown_pct:.2%} breached limit {MAX_DRAWDOWN_PCT:.2%}")
+        rm.set_halted(f"Max drawdown {drawdown_pct:.2%} breached limit {MAX_DRAWDOWN_PCT:.2%}", asset.name)
         executor.log_trade(None, first, strategy.name, None, note=f"max_drawdown_breach_{drawdown_pct:.2%}")
-        notify(f"{strategy.name} bot: MAX DRAWDOWN BREACH ({drawdown_pct:.2%}) -- all positions flattened, bot halted until manually cleared.")
+        notify(f"{strategy.name} bot: MAX DRAWDOWN BREACH ({drawdown_pct:.2%}) -- every position in the {asset.name} account flattened, halted until manually cleared.")
         return False
 
     # PER-STRATEGY: this strategy's own daily move limits and same-day memory
@@ -143,13 +147,13 @@ def run(name: str, dry_run: bool = False) -> None:
     if strategy.allocation_pct <= 0:
         print(f"{strategy.name} has allocation_pct=0 (research-only) -- give it an allocation in the registry to trade it.")
         return
-    trading_client = get_alpaca_trading_client()
+    trading_client = get_trading_client(strategy)
 
-    if rm.is_halted():
-        print("Halted (max drawdown previously breached) -- run risk_manager.clear_halt() after review.")
+    if rm.is_halted(asset.name):
+        print(f"Halted (max drawdown previously breached in the {asset.name} account) -- run risk_manager.clear_halt('{asset.name}') after review.")
         if not dry_run:
             executor.log_trade(None, first, strategy.name, None, note="halted")
-            notify(f"{strategy.name} bot: still halted from a prior max-drawdown breach. Needs manual review/clear_halt().")
+            notify(f"{strategy.name} bot: still halted from a prior max-drawdown breach in the {asset.name} account. Needs manual review/clear_halt('{asset.name}').")
         return
 
     if not asset.is_open(trading_client):
@@ -217,9 +221,9 @@ def run(name: str, dry_run: bool = False) -> None:
 def check(name: str) -> None:
     """Risk checks only: never computes a signal or opens a position."""
     strategy = get_strategy(name)
-    trading_client = get_alpaca_trading_client()
+    trading_client = get_trading_client(strategy)
 
-    if rm.is_halted():
+    if rm.is_halted(strategy.asset.name):
         print("Already halted -- nothing to check.")
         return
     if not strategy.asset.is_open(trading_client):

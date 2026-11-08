@@ -13,9 +13,14 @@ NO_POSITION_ERROR_CODE = 40410000  # shared by GET and DELETE /positions/{symbol
 
 RISK_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "risk"
 
-# GLOBAL kill switch: one halt file for the whole account. A max-drawdown breach is measured on
-# account equity, so it stops every strategy at once and needs a human to clear it.
+# KILL SWITCH, one per Alpaca account ("stock" and "crypto" are separate accounts). A max-drawdown
+# breach is measured on that account's equity, so it stops every strategy in that account at once
+# and needs a human to clear it. The stock account keeps the original halt_state.json name.
 HALT_STATE_PATH = RISK_DIR / "halt_state.json"
+
+
+def halt_path(account: str = "stock") -> Path:
+    return HALT_STATE_PATH if account == "stock" else RISK_DIR / f"halt_state_{account}.json"
 
 
 def daily_loss_path(strategy: str) -> Path:
@@ -82,24 +87,27 @@ def get_position_move_today(trading_client: TradingClient, symbol: str) -> float
     return float(position.unrealized_intraday_plpc)  # type: ignore[reportAttributeAccessIssue]
 
 
-def is_halted() -> bool:
-    if not HALT_STATE_PATH.exists():
+def is_halted(account: str = "stock") -> bool:
+    path = halt_path(account)
+    if not path.exists():
         return False
-    return json.loads(HALT_STATE_PATH.read_text()).get("halted", False)
+    return json.loads(path.read_text()).get("halted", False)
 
 
-def set_halted(reason: str) -> None:
-    HALT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    HALT_STATE_PATH.write_text(json.dumps({
+def set_halted(reason: str, account: str = "stock") -> None:
+    path = halt_path(account)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
         "halted": True,
         "reason": reason,
         "halted_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     }, indent=2))
 
 
-def clear_halt() -> None:
-    if HALT_STATE_PATH.exists():
-        HALT_STATE_PATH.unlink()
+def clear_halt(account: str = "stock") -> None:
+    path = halt_path(account)
+    if path.exists():
+        path.unlink()
 
 
 def get_daily_loss_level(strategy: str) -> str | None:
@@ -122,7 +130,7 @@ def set_daily_loss_level(strategy: str, level: str) -> None:
 
 
 def flatten_all(trading_client: TradingClient) -> None:
-    # the global kill switch sells every position in the account, whichever strategy opened it
+    # the kill switch sells every position in this account, whichever strategy opened it
     trading_client.close_all_positions(cancel_orders=True)
 
 

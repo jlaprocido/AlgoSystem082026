@@ -10,9 +10,9 @@ from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.requests import GetOrdersRequest
 
 from src.bar_config import BAR_CONFIG
-from src.config import get_alpaca_trading_client
+from src.assets import asset_for
+from src.config import crypto_account_configured, get_alpaca_crypto_trading_client, get_alpaca_trading_client
 from src.dashboard import performance
-from src.data.market_data import get_bars
 from src.risk import risk_manager as rm
 from src.strategy.registry import REGISTRY, Strategy
 from src.trading import executor
@@ -86,6 +86,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     padding: 12px 16px; border-radius: 4px; margin-bottom: 24px; font-weight: 600;
   }}
   .stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; }}
+  .stats.four {{ grid-template-columns: repeat(4, 1fr); }}
   .stat {{ background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 16px 20px; }}
   .stat .label {{ color: var(--muted); font: 600 .75rem var(--sans); letter-spacing: 0.12em; text-transform: uppercase; }}
   .stat .value {{ font: 500 1.9rem/1.2 var(--serif); margin-top: 4px; }}
@@ -129,7 +130,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   footer {{ background: var(--hero); color: #cfe3da; border-top: 6px solid var(--sky); margin-top: 24px; padding: 24px 0; font-size: 0.85rem; }}
 
   @media (max-width: 640px) {{
-    .stats {{ grid-template-columns: repeat(2, 1fr); }}
+    .stats, .stats.four {{ grid-template-columns: repeat(2, 1fr); }}
     .mini-stats {{ grid-template-columns: repeat(2, 1fr); }}
     .btn {{ flex: 1 1 100%; }}
   }}
@@ -155,20 +156,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </section>
   <main>
     <div class="wrap">
-      {halted_banner}
-      <div class="stats">
-        <div class="stat"><div class="label">Equity</div><div class="value">${equity:,.2f}</div></div>
-        <div class="stat"><div class="label">Today's PnL</div><div class="value {pnl_class}">{daily_pnl_pct:+.2%}</div></div>
-        <div class="stat"><div class="label">Total PnL</div><div class="value {total_pnl_class}">{total_pnl_display}</div></div>
-        <div class="stat"><div class="label">Drawdown from Peak</div><div class="value">{drawdown_pct:.2%}</div></div>
-        <div class="stat"><div class="label">Sharpe Ratio</div><div class="value">{sharpe_display}</div></div>
-        <div class="stat"><div class="label">Open Positions</div><div class="value">{open_positions}</div></div>
-      </div>
-      <div class="card">
-        <h2>Portfolio Equity vs. SPY Buy &amp; Hold</h2>
-        <div class="subhead">{chart_subhead}</div>
-        {equity_svg}
-      </div>
+      {headline_tiles}
+      {account_sections}
       <h2 class="section">Strategies</h2>
       {strategy_cards}
       <div class="card">
@@ -268,7 +257,7 @@ def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: l
     return svg + legend
 
 
-def compute_sharpe_ratio(equity_values: list) -> float | None:
+def compute_sharpe_ratio(equity_values: list, periods_per_year: int | None = None) -> float | None:
     # same (mean / std) * sqrt(bars_per_year) convention used throughout tests/ -- daily
     # portfolio history here plays the role a strategy's daily 'return' column plays there.
     # Returns None (rendered as "N/A") rather than 0 when there's not enough history yet or
@@ -285,7 +274,7 @@ def compute_sharpe_ratio(equity_values: list) -> float | None:
     if std_r == 0:
         return None
 
-    bars_per_year = BAR_CONFIG["1d"]["bars_per_year"]
+    bars_per_year = periods_per_year or BAR_CONFIG["1d"]["bars_per_year"]
     return (statistics.mean(returns) / std_r) * math.sqrt(bars_per_year)
 
 
@@ -297,7 +286,7 @@ def build_benchmark_series(symbol: str, dates: list) -> list[float] | None:
         return None
 
     try:
-        df = get_bars(symbol, dates[0], dates[-1] + dt.timedelta(days=1), interval="1d")
+        df = asset_for(symbol).get_bars(symbol, dates[0], dates[-1] + dt.timedelta(days=1), "1d")  # stock or crypto
     except Exception as e:
         print(f"Could not fetch benchmark data for {symbol}: {e}")
         return None
@@ -461,17 +450,6 @@ def build_strategy_card(st: Strategy, fills: list[dict], closes: dict[str, dict]
     )
 
 
-def fetch_fills(trading_client) -> dict[str, list[dict]]:
-    """Every filled order, grouped by the strategy that owns the symbol. Read from Alpaca rather
-    than the trade log, which never records the fills of risk liquidations (see performance.py)."""
-    owner = {sym: st.name for st in REGISTRY.values() if st.allocation_pct > 0 for sym in st.symbols}
-    # Alpaca names crypto positions BTCUSD but its orders keep BTC/USD, so orders match registry symbols
-    orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500))  # type: ignore[reportAttributeAccessIssue]
-    if len(orders) >= 500:
-        print("Warning: hit Alpaca's 500-order page limit -- older fills are missing from the strategy cards.")
-    return performance.fills_from_orders(orders, owner)  # type: ignore[reportArgumentType]
-
-
 def fetch_closes(st: Strategy, start: dt.date, end: dt.date) -> dict[str, dict]:
     """Daily closes per symbol; a data failure leaves that symbol out (the card falls back to fill prices)."""
     out = {}
@@ -484,69 +462,142 @@ def fetch_closes(st: Strategy, start: dt.date, end: dt.date) -> dict[str, dict]:
     return out
 
 
-def run() -> None:
-    trading_client = get_alpaca_trading_client()
+ACCOUNTS = {
+    "stock": {"title": "Stock account", "benchmark": "SPY", "benchmark_name": "SPY"},
+    "crypto": {"title": "Crypto account", "benchmark": "BTC/USD", "benchmark_name": "BTC"},
+}
 
-    account = trading_client.get_account()
-    equity = float(account.equity)  # type: ignore[reportAttributeAccessIssue]
-    last_equity = float(account.last_equity)  # type: ignore[reportAttributeAccessIssue]
-    daily_pnl_pct = (equity - last_equity) / last_equity if last_equity > 0 else 0.0
-    positions = {p.symbol: p for p in trading_client.get_all_positions()}  # type: ignore[reportAttributeAccessIssue]
+
+def get_clients() -> dict[str, object]:
+    """One Alpaca client per account. Crypto is a separate account; without its keys it is left out."""
+    clients: dict[str, object] = {"stock": get_alpaca_trading_client()}
+    if crypto_account_configured():
+        clients["crypto"] = get_alpaca_crypto_trading_client()
+    return clients
+
+
+def fetch_fills(client, account: str) -> dict[str, list[dict]]:
+    """Every filled order in one account, grouped by the strategy that owns the symbol. Read from
+    Alpaca rather than the trade log, which never records the fills of risk liquidations (see
+    performance.py). Orders keep BTC/USD while positions say BTCUSD, so orders match registry symbols."""
+    owner = {sym: st.name for st in REGISTRY.values() if st.allocation_pct > 0 and st.asset.name == account
+             for sym in st.symbols}
+    orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500))  # type: ignore[reportAttributeAccessIssue]
+    if len(orders) >= 500:
+        print(f"Warning: hit Alpaca's 500-order page limit in the {account} account -- older fills are missing.")
+    return performance.fills_from_orders(orders, owner)  # type: ignore[reportArgumentType]
+
+
+def load_account(account: str, client, today: dt.date) -> dict:
+    """Everything the page needs from one Alpaca account."""
+    info = client.get_account()
+    equity = float(info.equity)  # type: ignore[reportAttributeAccessIssue]
+    last_equity = float(info.last_equity)  # type: ignore[reportAttributeAccessIssue]
+    positions = {p.symbol: p for p in client.get_all_positions()}  # type: ignore[reportAttributeAccessIssue]
 
     # max_drawdown_pct=1.0 means this can never "breach" -- reusing check_max_drawdown purely
-    # for the current drawdown-from-peak number it already computes, read-only, same pattern
-    # eod_summary.py uses
-    _, drawdown_pct = rm.check_max_drawdown(trading_client, max_drawdown_pct=1.0)
-    halted = rm.is_halted()
+    # for the current drawdown-from-peak number it already computes, read-only
+    _, drawdown_pct = rm.check_max_drawdown(client, max_drawdown_pct=1.0)  # type: ignore[reportArgumentType]
 
     # dates/equity here already has Alpaca's pre-funding 0.0 padding stripped (see
-    # get_real_equity_history's docstring) -- but the account can still sit funded-and-flat
-    # for a while before the first real trade, so this trims further to start exactly where
-    # trading started, not just where the account started. Both the chart and every metric
-    # derived from it (Sharpe, Total PnL below) use this same window.
-    all_dates, all_equity = rm.get_real_equity_history(trading_client)
+    # get_real_equity_history's docstring). The history only has completed sessions, so today's
+    # live equity is added as the last point so the chart ends on the same number as the Equity
+    # tile. Stocks skip weekends (no session); crypto trades every day, so it never skips.
+    dates, equity_hist = rm.get_real_equity_history(client)  # type: ignore[reportArgumentType]
+    if (account == "crypto" or today.weekday() < 5) and (not dates or dates[-1] < today):
+        dates, equity_hist = dates + [today], equity_hist + [equity]
 
-    # the history only has completed sessions -- add today's live equity as the last point so
-    # the chart ends on the same number as the Equity tile. Skipped on weekends unless crypto is
-    # held, because crypto is the only thing that moves the account then.
-    today = dt.datetime.now(ZoneInfo("America/New_York")).date()  # session date, not UTC date
-    crypto_open = any(s.asset.name == "crypto" and s.asset.position_symbol(s.symbols[0]) in positions
-                      for s in REGISTRY.values())
-    if (today.weekday() < 5 or crypto_open) and (not all_dates or all_dates[-1] < today):
-        all_dates, all_equity = all_dates + [today], all_equity + [equity]
+    return {
+        "name": account, "equity": equity, "last_equity": last_equity, "positions": positions,
+        "drawdown_pct": drawdown_pct, "halted": rm.is_halted(account), "dates": dates, "equity_hist": equity_hist,
+        "fills": fetch_fills(client, account),
+    }
 
-    strategy_start = executor.find_strategy_start_date()
-    if strategy_start:
-        trimmed = [(d, e) for d, e in zip(all_dates, all_equity) if d >= strategy_start]
-        dates = [d for d, _ in trimmed]
-        equity_series = [e for _, e in trimmed]
+
+def _stat(label: str, value: str, css: str = "") -> str:
+    return f'<div class="stat"><div class="label">{label}</div><div class="value {css}">{value}</div></div>'
+
+
+def build_account_section(acct: dict) -> tuple[str, float, float]:
+    """(html, equity at the start of the trading window, equity now) for one account."""
+    cfg = ACCOUNTS[acct["name"]]
+    equity = acct["equity"]
+    daily = (equity - acct["last_equity"]) / acct["last_equity"] if acct["last_equity"] > 0 else 0.0
+
+    # trim to where trading started, not where the account was funded: an account can sit flat for
+    # weeks first, and counting that idle stretch would dilute Sharpe and the buy-and-hold comparison
+    first_fills = [f["date"] for fills in acct["fills"].values() for f in fills]
+    start = min(first_fills) if first_fills else None
+    if start:
+        trimmed = [(d, e) for d, e in zip(acct["dates"], acct["equity_hist"]) if d >= start]
+        dates, series = [d for d, _ in trimmed], [e for _, e in trimmed]
     else:
-        dates, equity_series = all_dates, all_equity
+        dates, series = acct["dates"], acct["equity_hist"]
+    start_equity = series[0] if series else equity
+    total_pct = equity / start_equity - 1 if series else None
 
-    total_pnl_pct = None
-    if len(equity_series) >= 1:
-        total_pnl_pct = equity / equity_series[0] - 1
-
+    benchmark, subhead = None, "Not enough history yet -- no trades placed"
     if len(dates) >= 2:
-        # the whole portfolio is compared with SPY (the stock benchmark in claude.md); each
-        # strategy card below compares against buy-and-hold of its own symbols instead
-        benchmark_ratios = build_benchmark_series("SPY", dates)
-        benchmark_series = [equity_series[0] * r for r in benchmark_ratios] if benchmark_ratios else None
-
-        since_label = "first trade" if strategy_start else "account funded, no trades yet"
-        chart_subhead = f"Since {dates[0].strftime('%b %d, %Y')} ({since_label})"
-        if benchmark_ratios:
-            benchmark_return = benchmark_ratios[-1] - 1
-            chart_subhead += f" -- Portfolio {total_pnl_pct:+.2%} vs. SPY Buy & Hold {benchmark_return:+.2%}"
+        ratios = build_benchmark_series(cfg["benchmark"], dates)
+        benchmark = [series[0] * r for r in ratios] if ratios else None
+        subhead = f"Since {dates[0].strftime('%b %d, %Y')} ({'first trade' if start else 'account funded, no trades yet'})"
+        if ratios:
+            subhead += f" -- Account {total_pct:+.2%} vs. {cfg['benchmark_name']} Buy & Hold {ratios[-1] - 1:+.2%}"
     else:
-        dates, equity_series, benchmark_series = [], [], None
-        chart_subhead = "Not enough history yet -- no trades placed"
+        dates, series = [], []
 
-    equity_svg = build_chart_svg(dates, equity_series, benchmark_series, strategy_label="Portfolio")
-    sharpe_ratio = compute_sharpe_ratio(equity_series)
+    ppy = ACCOUNT_PERIODS_PER_YEAR[acct["name"]]
+    sharpe = compute_sharpe_ratio(series, ppy)
+    banner = ('<div class="halted-banner">HALTED -- max drawdown previously breached in the '
+              f'{acct["name"]} account, awaiting manual review</div>' if acct["halted"] else "")
+    tiles = (
+        _stat("Equity", f"${equity:,.2f}")
+        + _stat("Today's PnL", f"{daily:+.2%}", "positive" if daily >= 0 else "negative")
+        + _stat("Total PnL", f"{total_pct:+.2%}" if total_pct is not None else "N/A",
+                ("positive" if total_pct >= 0 else "negative") if total_pct is not None else "")
+        + _stat("Drawdown from Peak", f"{acct['drawdown_pct']:.2%}")
+        + _stat("Sharpe Ratio", f"{sharpe:.2f}" if sharpe is not None else "N/A")
+        + _stat("Open Positions", str(len(acct["positions"])))
+    )
+    chart = build_chart_svg(dates, series, benchmark, strategy_label=cfg["title"])
+    section = (
+        f'<h2 class="section">{cfg["title"]}</h2>{banner}<div class="stats">{tiles}</div>'
+        f'<div class="card"><h2>{cfg["title"]} Equity vs. {cfg["benchmark_name"]} Buy &amp; Hold</h2>'
+        f'<div class="subhead">{subhead}</div>{chart}</div>'
+    )
+    return section, start_equity, equity
+
+
+ACCOUNT_PERIODS_PER_YEAR = {"stock": 252, "crypto": 365}
+
+
+def run() -> None:
+    today = dt.datetime.now(ZoneInfo("America/New_York")).date()  # session date, not UTC date
+    accounts = {name: load_account(name, client, today) for name, client in get_clients().items()}
+
+    sections, starts, nows, last = [], 0.0, 0.0, 0.0
+    for acct in accounts.values():
+        section, start_equity, now = build_account_section(acct)
+        sections.append(section)
+        starts, nows, last = starts + start_equity, nows + now, last + acct["last_equity"]
+    if "crypto" not in accounts:
+        sections.append('<p class="muted">Crypto account not configured (set ALPACA_CRYPTO_API_KEY / ALPACA_CRYPTO_API_SECRET): '
+                        "crypto strategies are not trading.</p>")
+
+    daily = (nows - last) / last if last > 0 else 0.0
+    total_pct = nows / starts - 1 if starts > 0 else None
+    n_positions = sum(len(a["positions"]) for a in accounts.values())
+    headline = (
+        '<div class="stats four">'
+        + _stat("Total Equity", f"${nows:,.2f}")
+        + _stat("Today's PnL", f"{daily:+.2%}", "positive" if daily >= 0 else "negative")
+        + _stat("Total PnL", f"{total_pct:+.2%}" if total_pct is not None else "N/A",
+                ("positive" if total_pct >= 0 else "negative") if total_pct is not None else "")
+        + _stat("Open Positions", str(n_positions))
+        + "</div>"
+    )
 
     trades = read_all_trades()  # newest first
-    fills = fetch_fills(trading_client)
     latest = {}
     for t in trades:  # first hit per strategy = its newest row
         latest.setdefault(performance.canonical_strategy(t.get("strategy", "")), t)
@@ -555,12 +606,15 @@ def run() -> None:
     for st in REGISTRY.values():
         if st.allocation_pct <= 0:
             continue  # research-only: backtest with src.backtest.lab, no live card
-        mine = fills.get(st.name, [])
+        acct = accounts.get(st.asset.name)
+        mine = acct["fills"].get(st.name, []) if acct else []
         start = mine[0]["date"] if mine else today
-        # capital = this strategy's sleeve of the account as it stood when the strategy started
-        capital = st.allocation_pct * equity_on(all_dates, all_equity, start, equity)
+        # capital = this strategy's sleeve of ITS account as it stood when the strategy started
+        base = equity_on(acct["dates"], acct["equity_hist"], start, acct["equity"]) if acct else 0.0
+        capital = st.allocation_pct * base
         closes = fetch_closes(st, start, today) if mine else {}
-        cards.append(build_strategy_card(st, mine, closes, capital, positions, latest.get(st.name), today))
+        cards.append(build_strategy_card(st, mine, closes, capital, acct["positions"] if acct else {},
+                                         latest.get(st.name), today))
     research = [s.name for s in REGISTRY.values() if s.allocation_pct <= 0]
     if research:
         cards.append(f'<p class="muted">Research-only (backtest, not trading): {html.escape(", ".join(research))}</p>')
@@ -569,20 +623,8 @@ def run() -> None:
         portfolio_url=PORTFOLIO_URL,
         repo_url=REPO_URL,
         updated_at=dt.datetime.now(dt.timezone.utc).strftime("%m-%d-%Y %H:%M:%S"),
-        halted_banner=(
-            '<div class="halted-banner">HALTED -- max drawdown previously breached, '
-            "awaiting manual review</div>" if halted else ""
-        ),
-        equity=equity,
-        daily_pnl_pct=daily_pnl_pct,
-        pnl_class="positive" if daily_pnl_pct >= 0 else "negative",
-        total_pnl_display=f"{total_pnl_pct:+.2%}" if total_pnl_pct is not None else "N/A",
-        total_pnl_class=("positive" if total_pnl_pct >= 0 else "negative") if total_pnl_pct is not None else "",
-        drawdown_pct=drawdown_pct,
-        sharpe_display=f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else "N/A",
-        open_positions=len(positions),
-        chart_subhead=chart_subhead,
-        equity_svg=equity_svg,
+        headline_tiles=headline,
+        account_sections="\n".join(sections),
         strategy_cards="\n".join(cards),
         trade_count=len(trades),
         trade_rows=build_trade_rows_html(trades),

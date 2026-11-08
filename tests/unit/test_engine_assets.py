@@ -169,7 +169,7 @@ def test_crypto_strategy_trades_fractional_gtc_with_no_market_hours(monkeypatch,
     client = SimpleNamespace(get_account=lambda: account, get_clock=lambda: (_ for _ in ()).throw(AssertionError("crypto must not check the stock clock")))
     monkeypatch.setattr(rm, "HALT_STATE_PATH", tmp_path / "halt.json")
     monkeypatch.setattr(engine, "get_strategy", lambda n: st)
-    monkeypatch.setattr(engine, "get_alpaca_trading_client", lambda: client)
+    monkeypatch.setattr(engine, "get_trading_client", lambda s: client)
     monkeypatch.setattr(engine, "load_ohlcv", lambda s: {"BTC/USD": bars})
     monkeypatch.setattr(engine, "check_risk_limits", lambda *a: True)
     monkeypatch.setattr(engine, "notify", lambda m: None)
@@ -183,7 +183,7 @@ def test_crypto_strategy_trades_fractional_gtc_with_no_market_hours(monkeypatch,
 
 
 def test_research_only_strategy_is_refused_by_the_live_engine(monkeypatch, capsys):
-    monkeypatch.setattr(engine, "get_alpaca_trading_client", lambda: (_ for _ in ()).throw(AssertionError("must not connect")))
+    monkeypatch.setattr(engine, "get_trading_client", lambda s: (_ for _ in ()).throw(AssertionError("must not connect")))
     engine.run("dual_momentum")
     assert "research-only" in capsys.readouterr().out
 
@@ -203,7 +203,7 @@ def test_fee_dust_counts_as_flat_so_a_flat_signal_does_not_chase_it(monkeypatch,
     client = SimpleNamespace(get_account=lambda: SimpleNamespace(equity="10000", non_marginable_buying_power="10000"))
     monkeypatch.setattr(rm, "HALT_STATE_PATH", tmp_path / "halt.json")
     monkeypatch.setattr(engine, "get_strategy", lambda n: st)
-    monkeypatch.setattr(engine, "get_alpaca_trading_client", lambda: client)
+    monkeypatch.setattr(engine, "get_trading_client", lambda s: client)
     monkeypatch.setattr(engine, "load_ohlcv", lambda s: {"BTC/USD": bars})
     monkeypatch.setattr(engine, "check_risk_limits", lambda *a: True)
     monkeypatch.setattr(engine, "notify", lambda m: None)
@@ -213,3 +213,45 @@ def test_fee_dust_counts_as_flat_so_a_flat_signal_does_not_chase_it(monkeypatch,
     monkeypatch.setattr(engine.executor, "log_trade", lambda order, sym, strat, sig, note="": calls.append(note))
     engine.run("btc_sma")
     assert calls == ["signal_unchanged"]
+
+
+# --- two Alpaca accounts: stocks and crypto never share cash, halts or keys ---
+
+def test_each_asset_class_trades_in_its_own_account(monkeypatch):
+    monkeypatch.setattr(assets, "get_alpaca_trading_client", lambda: "STOCK-ACCOUNT")
+    monkeypatch.setattr(assets, "get_alpaca_crypto_trading_client", lambda: "CRYPTO-ACCOUNT")
+    assert engine.get_trading_client(get_strategy("aapl_sma")) == "STOCK-ACCOUNT"
+    assert engine.get_trading_client(get_strategy("btc_sma")) == "CRYPTO-ACCOUNT"
+
+
+def test_crypto_without_its_own_keys_refuses_instead_of_using_the_stock_account(monkeypatch):
+    from src import config
+    monkeypatch.setattr(config, "ALPACA_CRYPTO_API_KEY", None)
+    monkeypatch.setattr(config, "ALPACA_CRYPTO_SECRET_KEY", None)
+    assert config.crypto_account_configured() is False
+    with pytest.raises(RuntimeError, match="ALPACA_CRYPTO_API_KEY"):
+        config.get_alpaca_crypto_trading_client()
+
+
+def test_halting_one_account_does_not_halt_the_other(tmp_path, monkeypatch):
+    monkeypatch.setattr(rm, "RISK_DIR", tmp_path)
+    monkeypatch.setattr(rm, "HALT_STATE_PATH", tmp_path / "halt_state.json")
+    rm.set_halted("test", "crypto")
+    assert rm.is_halted("crypto") and not rm.is_halted("stock") and not rm.is_halted()
+    rm.clear_halt("crypto")
+    assert not rm.is_halted("crypto")
+
+
+def test_crypto_drawdown_breach_flattens_and_halts_only_the_crypto_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(rm, "RISK_DIR", tmp_path)
+    monkeypatch.setattr(rm, "HALT_STATE_PATH", tmp_path / "halt_state.json")
+    closed = []
+    client = SimpleNamespace(
+        get_account=lambda: SimpleNamespace(equity="8000"),
+        get_portfolio_history=lambda req: SimpleNamespace(equity=[10_000.0], timestamp=[0]),
+        close_all_positions=lambda cancel_orders=False: closed.append("ALL"),
+    )
+    monkeypatch.setattr(engine, "notify", lambda m: None)
+    monkeypatch.setattr(engine.executor, "log_trade", lambda *a, **k: None)
+    assert engine.check_risk_limits(client, get_strategy("btc_sma")) is False
+    assert closed == ["ALL"] and rm.is_halted("crypto") and not rm.is_halted("stock")

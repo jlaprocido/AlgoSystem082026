@@ -9,6 +9,7 @@ four things that differ:
   time in force      DAY (orders expire at close)    GTC (the market never closes)
   trading hours      market clock                    always open
   position symbol    AAPL                            BTCUSD   (orders use "BTC/USD")
+  Alpaca account     the stock account               its own crypto account (separate keys)
 
 `asset_for(symbol)` picks the adapter: a "/" in the symbol ("BTC/USD") means crypto.
 """
@@ -19,7 +20,8 @@ import pandas as pd
 from alpaca.data.requests import CryptoBarsRequest, CryptoLatestQuoteRequest, StockLatestQuoteRequest
 from alpaca.trading.enums import TimeInForce
 
-from src.config import get_alpaca_client, get_alpaca_crypto_client
+from src.config import (get_alpaca_client, get_alpaca_crypto_client, get_alpaca_crypto_trading_client,
+                        get_alpaca_trading_client)
 from src.data.market_data import ALPACA_TIMEFRAMES, STANDARD_COLUMNS, get_bars
 
 # bars per year, for annualizing Sharpe. Stocks trade 252 days x 6.5h; crypto trades every day.
@@ -45,6 +47,9 @@ class StockAsset:
 
     def get_bars(self, symbol: str, start: dt.date, end: dt.date, interval: str) -> pd.DataFrame:
         return get_bars(symbol, start, end, interval=interval)
+
+    def trading_client(self):
+        return get_alpaca_trading_client()
 
     def is_open(self, trading_client) -> bool:
         return trading_client.get_clock().is_open
@@ -87,6 +92,9 @@ class CryptoAsset:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         return df[["timestamp", "symbol", *STANDARD_COLUMNS]]
 
+    def trading_client(self):
+        return get_alpaca_crypto_trading_client()  # raises a clear error if no crypto account is set up
+
     def is_open(self, trading_client) -> bool:
         return True  # 24/7
 
@@ -104,8 +112,8 @@ class CryptoAsset:
         return round(price, 2) if price >= 1 else round(price, 6)
 
     def buying_power(self, account) -> float | None:
-        # crypto cannot be bought on margin: it needs cash. A fully-levered stock book
-        # (e.g. AAPL at 2x) leaves none, so the engine caps crypto buys at this number.
+        # crypto cannot be bought on margin: it needs cash, so the engine caps buys at this
+        # number (and a crypto account that spends its cash gets a smaller order, not a rejection)
         return float(account.non_marginable_buying_power)
 
 

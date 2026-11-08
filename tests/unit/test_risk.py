@@ -156,7 +156,7 @@ def run_env(monkeypatch, tmp_path):
     strategy = dataclasses.replace(STRATEGY, fn=lambda ohlcv, **p: pd.DataFrame({"AAPL": [env.signal]}, index=bars.index))
     monkeypatch.setattr(rm, "HALT_STATE_PATH", tmp_path / "halt.json")
     monkeypatch.setattr(engine, "get_strategy", lambda name: strategy)
-    monkeypatch.setattr(engine, "get_alpaca_trading_client", lambda: FakeTradingClient())
+    monkeypatch.setattr(engine, "get_trading_client", lambda s: FakeTradingClient())
     monkeypatch.setattr(engine, "load_ohlcv", lambda s: {"AAPL": bars})
     monkeypatch.setattr(engine, "notify", lambda msg: None)
     monkeypatch.setattr(engine, "check_risk_limits", lambda *a: True)
