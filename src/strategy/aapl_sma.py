@@ -9,7 +9,7 @@ SYMBOL = "AAPL"
 FAST_WINDOW = 5
 SLOW_WINDOW = 20
 TARGET_ALLOCATION_PCT = 1.0  # fraction of account equity to allocate when the signal is long
-LEVERAGE_MULTIPLIER = 2.0  # 2x overnight Reg T margin -- see executor.get_target_shares for why
+LEVERAGE_MULTIPLIER = 2.0  # 2x overnight Reg T margin -- see executor.get_target_qty for why
                            # this is an explicit constant rather than read from Alpaca's account.
                            # Losses scale with this exactly as much as gains do; the reason this
                            # is considered acceptable here is intraday_check.py's more frequent

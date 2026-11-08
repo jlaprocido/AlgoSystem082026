@@ -6,11 +6,15 @@ import statistics
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from alpaca.trading.enums import QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
+
 from src.bar_config import BAR_CONFIG
 from src.config import get_alpaca_trading_client
+from src.dashboard import performance
 from src.data.market_data import get_bars
 from src.risk import risk_manager as rm
-from src.strategy import aapl_sma
+from src.strategy.registry import REGISTRY, Strategy
 from src.trading import executor
 
 # Static-site generator, not a server -- run once per workflow invocation (run_daily,
@@ -33,7 +37,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="1800">
-<title>{symbol} SMA Bot | James Laprocido</title>
+<title>Algo Portfolio | James Laprocido</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600;6..72,700&display=swap" rel="stylesheet">
@@ -97,6 +101,16 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .axis-label {{ fill: var(--muted); font-size: 11px; font-family: var(--sans); }}
   .grid-line {{ stroke: var(--rule); stroke-width: 1; }}
 
+  h2.section {{ font: 500 1.6rem/1.2 var(--serif); margin: 8px 0 16px; letter-spacing: -0.01em; }}
+  .strategy-head {{ display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }}
+  .tag {{ display: inline-block; font: 600 .7rem var(--sans); letter-spacing: 0.1em; text-transform: uppercase;
+          background: var(--soft); color: var(--ink); border-radius: 3px; padding: 2px 8px; margin-left: 6px; }}
+  .tag.crypto {{ background: #fdf1d8; }}
+  .mini-stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 12px 0 16px; }}
+  .mini .label {{ color: var(--muted); font: 600 .7rem var(--sans); letter-spacing: 0.1em; text-transform: uppercase; }}
+  .mini .value {{ font: 500 1.3rem/1.3 var(--serif); }}
+  .status-line {{ font-size: 0.85rem; color: var(--muted); margin-top: 10px; }}
+
   .table-wrap {{ max-height: 420px; overflow: auto; border: 1px solid var(--rule); border-radius: 4px; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
   th, td {{ text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }}
@@ -116,6 +130,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   @media (max-width: 640px) {{
     .stats {{ grid-template-columns: repeat(2, 1fr); }}
+    .mini-stats {{ grid-template-columns: repeat(2, 1fr); }}
     .btn {{ flex: 1 1 100%; }}
   }}
 </style>
@@ -130,7 +145,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <section class="hero">
     <div class="wrap">
       <p class="eyebrow">Live paper trading</p>
-      <h1>{symbol} SMA Bot</h1>
+      <h1>Algo Portfolio</h1>
       <div class="actions">
         <a class="btn" href="{portfolio_url}">&larr; Portfolio</a>
         <a class="btn btn--line" href="{repo_url}">View code</a>
@@ -147,19 +162,21 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
         <div class="stat"><div class="label">Total PnL</div><div class="value {total_pnl_class}">{total_pnl_display}</div></div>
         <div class="stat"><div class="label">Drawdown from Peak</div><div class="value">{drawdown_pct:.2%}</div></div>
         <div class="stat"><div class="label">Sharpe Ratio</div><div class="value">{sharpe_display}</div></div>
-        <div class="stat"><div class="label">Position</div><div class="value">{current_shares} sh</div></div>
+        <div class="stat"><div class="label">Open Positions</div><div class="value">{open_positions}</div></div>
       </div>
       <div class="card">
-        <h2>Equity vs. {symbol} Buy &amp; Hold</h2>
+        <h2>Portfolio Equity vs. SPY Buy &amp; Hold</h2>
         <div class="subhead">{chart_subhead}</div>
         {equity_svg}
       </div>
+      <h2 class="section">Strategies</h2>
+      {strategy_cards}
       <div class="card">
         <h2>Recent Activity</h2>
         <div class="subhead">{trade_count} entries, newest first. Scroll for the full log.</div>
         <div class="table-wrap">
         <table>
-          <thead><tr><th>Date &amp; Time (UTC)</th><th>Signal</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Status</th></tr></thead>
+          <thead><tr><th>Date &amp; Time (UTC)</th><th>Strategy</th><th>Symbol</th><th>Signal</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Status</th></tr></thead>
           <tbody>
             {trade_rows}
           </tbody>
@@ -171,8 +188,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <footer>
     <div class="wrap">
       Paper trading via Alpaca. Not investment advice.<br>
-      This page reloads in your browser every 30 minutes, but the numbers only change when the bot
-      actually runs (see "Last updated" above) -- roughly hourly during market hours, less often outside it.
+      Each strategy's curve is rebuilt from its own filled orders at daily closes, with its sleeve of the account
+      as starting capital (so a 2x strategy's swings show up at 2x). It ignores crypto fees that Alpaca takes in coins.
+      The page reloads every 30 minutes, but numbers only change when a bot runs (see "Last updated").
     </div>
   </footer>
 </body>
@@ -188,7 +206,7 @@ def _nice_ticks(lo: float, hi: float, count: int = 5) -> list[float]:
 
 
 def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: list[float] | None,
-                     width: int = 780, height: int = 240) -> str:
+                     width: int = 780, height: int = 240, strategy_label: str = "Strategy") -> str:
     if len(equity_values) < 2:
         return "<p class='muted'>Not enough history yet.</p>"
 
@@ -212,11 +230,12 @@ def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: l
 
     # y-axis: auto-scaled gridlines + $ labels from the actual combined data range
     y_ticks = _nice_ticks(lo, hi, 5)
+    money = "${:,.0f}" if span >= 50 else "${:,.2f}"  # small sleeves (a few hundred dollars) need cents
     y_axis_svg = []
     for v in y_ticks:
         _, y = to_xy(0, v)
         y_axis_svg.append(f'<line x1="{margin_left}" y1="{y:.1f}" x2="{width - margin_right}" y2="{y:.1f}" class="grid-line"/>')
-        y_axis_svg.append(f'<text x="{margin_left - 8}" y="{y + 4:.1f}" text-anchor="end" class="axis-label">${v:,.0f}</text>')
+        y_axis_svg.append(f'<text x="{margin_left - 8}" y="{y + 4:.1f}" text-anchor="end" class="axis-label">{money.format(v)}</text>')
 
     # x-axis: 5 evenly spaced date labels, auto-scaled to the actual date range
     x_axis_svg = []
@@ -235,7 +254,7 @@ def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: l
 
     legend = (
         '<div class="legend">'
-        f'<span><span class="swatch" style="background:{STRATEGY_COLOR}"></span>Strategy</span>'
+        f'<span><span class="swatch" style="background:{STRATEGY_COLOR}"></span>{strategy_label}</span>'
     )
     if benchmark_values:
         legend += f'<span><span class="swatch" style="background:{BENCHMARK_COLOR}"></span>Buy &amp; Hold</span>'
@@ -327,7 +346,7 @@ def format_status(raw: str) -> str:
 
 def build_trade_rows_html(trades: list[dict]) -> str:
     if not trades:
-        return '<tr><td colspan="6" class="muted">No activity logged yet.</td></tr>'
+        return '<tr><td colspan="8" class="muted">No activity logged yet.</td></tr>'
 
     signal_names = {"1": "Long", "0": "Flat"}
     rows = []
@@ -336,6 +355,8 @@ def build_trade_rows_html(trades: list[dict]) -> str:
         side_class = "side-buy" if side == "buy" else ("side-sell" if side == "sell" else "muted")
         raw_price = t.get("filled_avg_price") or t.get("limit_price") or ""
         price = f"${float(raw_price):,.2f}" if raw_price else "&mdash;"
+        strategy = html.escape(performance.canonical_strategy(t.get("strategy", "")))
+        symbol = html.escape(t.get("symbol", ""))
         qty = t.get("qty") or ""
         qty_display = html.escape(qty) if qty and qty != "0" else "&mdash;"
         signal = signal_names.get(t.get("signal", ""), "&mdash;")
@@ -344,6 +365,8 @@ def build_trade_rows_html(trades: list[dict]) -> str:
         rows.append(
             "<tr>"
             f"<td>{html.escape(format_timestamp(t.get('timestamp', '')))}</td>"
+            f"<td>{strategy}</td>"
+            f"<td>{symbol}</td>"
             f"<td>{signal}</td>"
             f"<td class='{side_class}'>{html.escape(side.capitalize()) if side else '&mdash;'}</td>"
             f"<td class='num'>{qty_display}</td>"
@@ -354,34 +377,142 @@ def build_trade_rows_html(trades: list[dict]) -> str:
     return "\n".join(rows)
 
 
+
+
+def _signed(value: float, pct: bool = True) -> tuple[str, str]:
+    """(text, css class) for a number that is good when positive."""
+    text = f"{value:+.2%}" if pct else f"{'+' if value >= 0 else '-'}${abs(value):,.2f}"
+    return text, "positive" if value >= 0 else "negative"
+
+
+def _fmt_qty(st: Strategy, symbol: str, qty: float) -> str:
+    if st.asset.name == "stock":
+        return f"{int(qty)} sh"
+    return f"{qty:.6f}".rstrip("0").rstrip(".") + " " + symbol.split("/")[0]
+
+
+def _mini(label: str, value: str, css: str = "") -> str:
+    return f'<div class="mini"><div class="label">{label}</div><div class="value {css}">{value}</div></div>'
+
+
+def equity_on(dates: list, equity: list[float], day: dt.date, fallback: float) -> float:
+    """Account equity at the close of `day` (or the nearest earlier point)."""
+    earlier = [e for d, e in zip(dates, equity) if d <= day]
+    return earlier[-1] if earlier else (equity[0] if equity else fallback)
+
+
+def build_strategy_card(st: Strategy, fills: list[dict], closes: dict[str, dict], capital: float,
+                        positions: dict, latest: dict | None, end: dt.date) -> str:
+    asset = st.asset
+    lev = f" &middot; {st.leverage:g}x" if st.leverage != 1 else ""
+    subhead = (f"{html.escape(', '.join(st.symbols))} &middot; {st.interval} bars &middot; "
+               f"sleeve {st.allocation_pct:.0%} of equity{lev}")
+
+    held = [(s, positions.get(asset.position_symbol(s))) for s in st.symbols]
+    held = [(s, p) for s, p in held if p is not None and float(p.qty) != 0]  # type: ignore[reportAttributeAccessIssue]
+    if held:
+        position = "<br>".join(_fmt_qty(st, s, float(p.qty)) for s, p in held)  # type: ignore[reportAttributeAccessIssue]
+        position_value = sum(float(p.market_value) for _, p in held)  # type: ignore[reportAttributeAccessIssue]
+        position += f' <span class="muted" style="font-size:.8rem">(${position_value:,.2f})</span>'
+    else:
+        position = "Flat"
+
+    if latest:
+        signal = {"1": "Long", "0": "Flat"}.get(latest.get("signal", ""), "&mdash;")
+        status_line = (f"Last run: {html.escape(format_timestamp(latest.get('timestamp', '')))} UTC &middot; "
+                       f"signal {signal} &middot; {html.escape(format_status(latest.get('status', '')))}")
+    else:
+        status_line = "Not run yet &mdash; waiting for the first scheduled run."
+
+    if not fills:
+        minis = _mini("Position", position) + _mini("Trades", "0") + _mini("Return", "N/A") + _mini("Sleeve", f"${capital:,.0f}")
+        chart = "<p class='muted'>No filled trades yet, so there is no curve to draw. It appears after the first fill.</p>"
+        body_sub = "Waiting for its first trade"
+    else:
+        dates, values, bench = performance.strategy_curve(fills, closes, capital, end)
+        ret = values[-1] / capital - 1
+        bench_ret = bench[-1] / capital - 1
+        ppy = asset.bars_per_year["1d"]
+        sharpe = performance.sharpe(values, ppy)
+        ret_txt, ret_css = _signed(ret)
+        pnl_txt, pnl_css = _signed(values[-1] - capital, pct=False)
+        edge_txt, edge_css = _signed(ret - bench_ret)
+        minis = (
+            _mini("Return on sleeve", ret_txt, ret_css)
+            + _mini("vs. Buy &amp; Hold", edge_txt, edge_css)
+            + _mini("PnL", pnl_txt, pnl_css)
+            + _mini("Position", position)
+            + _mini("Sharpe", f"{sharpe:.2f}" if sharpe is not None else "N/A")
+            + _mini("Max drawdown", f"{performance.max_drawdown(values):.2%}")
+            + _mini("Trades", str(len(fills)))
+            + _mini("Buy &amp; Hold", f"{bench_ret:+.2%}")
+        )
+        chart = build_chart_svg(dates, values, bench, height=190, strategy_label=html.escape(st.name))
+        body_sub = f"Since {dates[0].strftime('%b %d, %Y')} (first fill)"
+
+    return (
+        '<div class="card">'
+        f'<div class="strategy-head"><h2>{html.escape(st.name)}<span class="tag {asset.name}">{asset.name}</span></h2>'
+        f'<div class="subhead">{subhead}</div></div>'
+        f'<div class="subhead">{body_sub}</div>'
+        f'<div class="mini-stats">{minis}</div>{chart}'
+        f'<div class="status-line">{status_line}</div>'
+        '</div>'
+    )
+
+
+def fetch_fills(trading_client) -> dict[str, list[dict]]:
+    """Every filled order, grouped by the strategy that owns the symbol. Read from Alpaca rather
+    than the trade log, which never records the fills of risk liquidations (see performance.py)."""
+    owner = {sym: st.name for st in REGISTRY.values() if st.allocation_pct > 0 for sym in st.symbols}
+    # Alpaca names crypto positions BTCUSD but its orders keep BTC/USD, so orders match registry symbols
+    orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500))  # type: ignore[reportAttributeAccessIssue]
+    if len(orders) >= 500:
+        print("Warning: hit Alpaca's 500-order page limit -- older fills are missing from the strategy cards.")
+    return performance.fills_from_orders(orders, owner)  # type: ignore[reportArgumentType]
+
+
+def fetch_closes(st: Strategy, start: dt.date, end: dt.date) -> dict[str, dict]:
+    """Daily closes per symbol; a data failure leaves that symbol out (the card falls back to fill prices)."""
+    out = {}
+    for sym in st.symbols:
+        try:
+            df = st.asset.get_bars(sym, start, end + dt.timedelta(days=1), "1d")
+            out[sym] = {row.timestamp.date(): row.close for row in df.itertuples()}  # type: ignore[reportAttributeAccessIssue]
+        except Exception as e:
+            print(f"Could not fetch prices for {sym}: {e}")
+    return out
+
+
 def run() -> None:
     trading_client = get_alpaca_trading_client()
-    symbol = aapl_sma.SYMBOL
 
     account = trading_client.get_account()
     equity = float(account.equity)  # type: ignore[reportAttributeAccessIssue]
     last_equity = float(account.last_equity)  # type: ignore[reportAttributeAccessIssue]
     daily_pnl_pct = (equity - last_equity) / last_equity if last_equity > 0 else 0.0
+    positions = {p.symbol: p for p in trading_client.get_all_positions()}  # type: ignore[reportAttributeAccessIssue]
 
     # max_drawdown_pct=1.0 means this can never "breach" -- reusing check_max_drawdown purely
     # for the current drawdown-from-peak number it already computes, read-only, same pattern
     # eod_summary.py uses
     _, drawdown_pct = rm.check_max_drawdown(trading_client, max_drawdown_pct=1.0)
-    current_shares = executor.get_current_shares(trading_client, symbol)
     halted = rm.is_halted()
 
     # dates/equity here already has Alpaca's pre-funding 0.0 padding stripped (see
     # get_real_equity_history's docstring) -- but the account can still sit funded-and-flat
-    # for a while before the strategy's first real trade, so this trims further to start
-    # exactly where the strategy itself started, not just where the account started. Both the
-    # chart and every metric derived from it (Sharpe, Total PnL below) use this same window,
-    # so "how has the strategy done" never gets diluted by weeks of doing nothing first.
+    # for a while before the first real trade, so this trims further to start exactly where
+    # trading started, not just where the account started. Both the chart and every metric
+    # derived from it (Sharpe, Total PnL below) use this same window.
     all_dates, all_equity = rm.get_real_equity_history(trading_client)
 
     # the history only has completed sessions -- add today's live equity as the last point so
-    # the chart ends on the same number as the Equity tile (skipped on weekends: no session)
+    # the chart ends on the same number as the Equity tile. Skipped on weekends unless crypto is
+    # held, because crypto is the only thing that moves the account then.
     today = dt.datetime.now(ZoneInfo("America/New_York")).date()  # session date, not UTC date
-    if today.weekday() < 5 and (not all_dates or all_dates[-1] < today):
+    crypto_open = any(s.asset.name == "crypto" and s.asset.position_symbol(s.symbols[0]) in positions
+                      for s in REGISTRY.values())
+    if (today.weekday() < 5 or crypto_open) and (not all_dates or all_dates[-1] < today):
         all_dates, all_equity = all_dates + [today], all_equity + [equity]
 
     strategy_start = executor.find_strategy_start_date()
@@ -397,25 +528,44 @@ def run() -> None:
         total_pnl_pct = equity / equity_series[0] - 1
 
     if len(dates) >= 2:
-        benchmark_ratios = build_benchmark_series(symbol, dates)
+        # the whole portfolio is compared with SPY (the stock benchmark in claude.md); each
+        # strategy card below compares against buy-and-hold of its own symbols instead
+        benchmark_ratios = build_benchmark_series("SPY", dates)
         benchmark_series = [equity_series[0] * r for r in benchmark_ratios] if benchmark_ratios else None
 
         since_label = "first trade" if strategy_start else "account funded, no trades yet"
         chart_subhead = f"Since {dates[0].strftime('%b %d, %Y')} ({since_label})"
         if benchmark_ratios:
             benchmark_return = benchmark_ratios[-1] - 1
-            chart_subhead += f" -- Strategy {total_pnl_pct:+.2%} vs. Buy & Hold {benchmark_return:+.2%}"
+            chart_subhead += f" -- Portfolio {total_pnl_pct:+.2%} vs. SPY Buy & Hold {benchmark_return:+.2%}"
     else:
         dates, equity_series, benchmark_series = [], [], None
         chart_subhead = "Not enough history yet -- no trades placed"
 
-    equity_svg = build_chart_svg(dates, equity_series, benchmark_series)
+    equity_svg = build_chart_svg(dates, equity_series, benchmark_series, strategy_label="Portfolio")
     sharpe_ratio = compute_sharpe_ratio(equity_series)
 
-    trades = read_all_trades()
+    trades = read_all_trades()  # newest first
+    fills = fetch_fills(trading_client)
+    latest = {}
+    for t in trades:  # first hit per strategy = its newest row
+        latest.setdefault(performance.canonical_strategy(t.get("strategy", "")), t)
+
+    cards = []
+    for st in REGISTRY.values():
+        if st.allocation_pct <= 0:
+            continue  # research-only: backtest with src.backtest.lab, no live card
+        mine = fills.get(st.name, [])
+        start = mine[0]["date"] if mine else today
+        # capital = this strategy's sleeve of the account as it stood when the strategy started
+        capital = st.allocation_pct * equity_on(all_dates, all_equity, start, equity)
+        closes = fetch_closes(st, start, today) if mine else {}
+        cards.append(build_strategy_card(st, mine, closes, capital, positions, latest.get(st.name), today))
+    research = [s.name for s in REGISTRY.values() if s.allocation_pct <= 0]
+    if research:
+        cards.append(f'<p class="muted">Research-only (backtest, not trading): {html.escape(", ".join(research))}</p>')
 
     html_out = PAGE_TEMPLATE.format(
-        symbol=symbol,
         portfolio_url=PORTFOLIO_URL,
         repo_url=REPO_URL,
         updated_at=dt.datetime.now(dt.timezone.utc).strftime("%m-%d-%Y %H:%M:%S"),
@@ -430,9 +580,10 @@ def run() -> None:
         total_pnl_class=("positive" if total_pnl_pct >= 0 else "negative") if total_pnl_pct is not None else "",
         drawdown_pct=drawdown_pct,
         sharpe_display=f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else "N/A",
-        current_shares=current_shares,
+        open_positions=len(positions),
         chart_subhead=chart_subhead,
         equity_svg=equity_svg,
+        strategy_cards="\n".join(cards),
         trade_count=len(trades),
         trade_rows=build_trade_rows_html(trades),
     )

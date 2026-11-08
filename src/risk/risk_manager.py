@@ -11,8 +11,17 @@ NO_POSITION_ERROR_CODE = 40410000  # shared by GET and DELETE /positions/{symbol
                                     # exist" vs "position not found: AAPL") -- match on the
                                     # stable numeric code instead of fragile message wording
 
-HALT_STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "risk" / "halt_state.json"
-DAILY_LOSS_STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "risk" / "daily_loss_state.json"
+RISK_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "risk"
+
+# GLOBAL kill switch: one halt file for the whole account. A max-drawdown breach is measured on
+# account equity, so it stops every strategy at once and needs a human to clear it.
+HALT_STATE_PATH = RISK_DIR / "halt_state.json"
+
+
+def daily_loss_path(strategy: str) -> Path:
+    # PER-STRATEGY state: each strategy remembers its own "already cut/flattened today", so a bad
+    # day in one strategy does not silence (or re-trigger) another
+    return RISK_DIR / f"daily_loss_{strategy}.json"
 
 
 def check_market_open(trading_client: TradingClient) -> bool:
@@ -61,8 +70,9 @@ def get_real_equity_history(trading_client: TradingClient) -> tuple[list, list]:
 
 
 def get_position_move_today(trading_client: TradingClient, symbol: str) -> float:
-    # the held position's % change since yesterday's close, i.e. the stock's own move
-    # (unlevered) -- 0.0 when flat, since there is nothing at risk to react to
+    # the held position's % change since yesterday's close, i.e. the asset's own move
+    # (unlevered) -- 0.0 when flat, since there is nothing at risk to react to.
+    # `symbol` is the POSITION symbol (BTCUSD, not BTC/USD) -- see assets.position_symbol
     try:
         position = trading_client.get_open_position(symbol)
     except APIError as e:
@@ -92,21 +102,28 @@ def clear_halt() -> None:
         HALT_STATE_PATH.unlink()
 
 
-def get_daily_loss_level() -> str | None:
+def get_daily_loss_level(strategy: str) -> str | None:
     # daily-loss breaches self-clear the next trading day (unlike the drawdown halt), but
     # within the *same* day this needs its own memory: intraday_check.py can call
     # check_risk_limits() several times before the day rolls over, and without this a move
     # that's still breached on the next check would act and re-notify every single time.
     # Returns what was already done today ("reduced" or "flattened"), or None.
-    if not DAILY_LOSS_STATE_PATH.exists():
+    path = daily_loss_path(strategy)
+    if not path.exists():
         return None
-    state = json.loads(DAILY_LOSS_STATE_PATH.read_text())
+    state = json.loads(path.read_text())
     return state.get("level") if state.get("handled_date") == dt.date.today().isoformat() else None
 
 
-def set_daily_loss_level(level: str) -> None:
-    DAILY_LOSS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DAILY_LOSS_STATE_PATH.write_text(json.dumps({"handled_date": dt.date.today().isoformat(), "level": level}))
+def set_daily_loss_level(strategy: str, level: str) -> None:
+    path = daily_loss_path(strategy)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"handled_date": dt.date.today().isoformat(), "level": level}))
+
+
+def flatten_all(trading_client: TradingClient) -> None:
+    # the global kill switch sells every position in the account, whichever strategy opened it
+    trading_client.close_all_positions(cancel_orders=True)
 
 
 def flatten_position(trading_client: TradingClient, symbol: str) -> None:

@@ -1,7 +1,7 @@
 import os
 
 from dotenv import load_dotenv
-from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.trading.client import TradingClient
 
 load_dotenv()  # reads the .env file into environment variables
@@ -32,3 +32,8 @@ def get_alpaca_client() -> StockHistoricalDataClient:
 
 def get_alpaca_trading_client() -> TradingClient:
     return TradingClient(ALPACA_API_KEY, ALPACA_SECRET_KEY, paper=ALPACA_PAPER)
+
+
+def get_alpaca_crypto_client() -> CryptoHistoricalDataClient:
+    # crypto market data is 24/7; the same API keys work, and crypto data needs no separate feed
+    return CryptoHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)

@@ -11,24 +11,10 @@ import numpy as np
 import pandas as pd
 
 from src.backtest.portfolio import load_ohlcv, closes, portfolio_returns, summary
+from src.strategy.library import dual_momentum_weights  # the strategy function now lives in the library
 
 UNIVERSE = ["SPY", "EFA", "TLT", "GLD"]   # US stocks, international stocks, long bonds, gold
 LOOKBACKS = [63, 126, 189, 252]           # ~3, 6, 9, 12 months of trading days
-
-
-def dual_momentum_weights(close: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    mom = close.pct_change(lookback).fillna(-np.inf)   # no history yet -> never picked
-    best = mom.idxmax(axis=1)                       # strongest asset each day
-    best_ret = mom.max(axis=1)
-
-    weights = pd.DataFrame(0.0, index=close.index, columns=close.columns)
-    for date in close.index:
-        if best_ret[date] > 0:
-            weights.loc[date, best[date]] = 1.0
-
-    # only change the holding on the last trading day of each month, carry it otherwise
-    month_end = close.index.to_series().groupby(close.index.tz_localize(None).to_period("M")).transform("max") == close.index
-    return weights.where(month_end).ffill().fillna(0.0)
 
 
 def run_lookbacks(close: pd.DataFrame, lookbacks=LOOKBACKS) -> dict:

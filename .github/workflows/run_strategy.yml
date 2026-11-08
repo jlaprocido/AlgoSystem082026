@@ -1,0 +1,116 @@
+name: Run Strategy
+
+# Runs ANY strategy in src/strategy/registry.py once. cron-job.org calls workflow_dispatch with
+# the strategy name as an input, at that strategy's own cadence (crypto never closes, so e.g.
+# btc_sma can be dispatched daily or hourly, any time of day):
+#
+#   POST /repos/<owner>/<repo>/actions/workflows/run_strategy.yml/dispatches
+#   {"ref": "main", "inputs": {"strategy": "btc_sma"}}
+#
+# For a fast risk-only pass, add "check_only": "true". (The AAPL bot keeps its own workflows.)
+on:
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: "Strategy name from src/strategy/registry.py (e.g. btc_sma, eth_donchian)"
+        required: true
+        type: string
+      check_only:
+        description: "Risk checks only, never opens a position"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+# one run per strategy at a time; different strategies can run side by side
+concurrency:
+  group: "run-strategy-${{ inputs.strategy }}"
+  cancel-in-progress: false
+
+jobs:
+  run-strategy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Run strategy
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          STRATEGY: ${{ inputs.strategy }}
+          CHECK_ONLY: ${{ inputs.check_only }}
+        run: |
+          if [ "$CHECK_ONLY" = "true" ]; then
+            python -m src.trading.run_strategy "$STRATEGY" --check-only
+          else
+            python -m src.trading.run_strategy "$STRATEGY"
+          fi
+
+      # same ephemeral-runner persistence as the other workflows: commit the trade log and
+      # per-strategy risk state back, retrying on a push race, never failing the job over it
+      - name: Persist trade log / risk state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config merge.union.driver "git merge-file --union %A %O %B"
+          git add data/orders/trade_log.csv data/risk/
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+          git commit -m "Update trade log / risk state [skip ci]"
+
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "Pushed successfully."
+              exit 0
+            fi
+            echo "Push rejected (attempt $i/5) -- fetching and rebasing..."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "Rebase hit a real conflict -- dropping this run's state commit instead of failing the job."
+              git rebase --abort
+              exit 0
+            fi
+            sleep $((RANDOM % 10 + 1))
+          done
+          echo "Failed to push after 5 attempts -- giving up without failing the job."
+
+      # refresh the dashboard after every run (crypto trades on weekends, when the AAPL workflows
+      # are idle). Best-effort: two workflows deploying Pages at once can collide, and a failed
+      # page refresh must never turn a successful trade run red.
+      - name: Build dashboard
+        continue-on-error: true
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+        run: python -m src.dashboard.build_dashboard
+
+      - uses: actions/configure-pages@v6.0.0
+        continue-on-error: true
+
+      - uses: actions/upload-pages-artifact@v5.0.0
+        continue-on-error: true
+        with:
+          path: public
+
+      - uses: actions/deploy-pages@v5.0.1
+        id: deployment
+        continue-on-error: true
