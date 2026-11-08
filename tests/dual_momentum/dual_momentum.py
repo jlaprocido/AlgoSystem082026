@@ -21,10 +21,9 @@ def dual_momentum_weights(close: pd.DataFrame, lookback: int) -> pd.DataFrame:
     best = mom.idxmax(axis=1)                       # strongest asset each day
     best_ret = mom.max(axis=1)
 
-    weights = pd.DataFrame(0.0, index=close.index, columns=close.columns)
-    for date in close.index:
-        if best_ret[date] > 0:
-            weights.loc[date, best[date]] = 1.0
+    # 1.0 in the best asset's column, but only on days its momentum is positive
+    is_best = pd.DataFrame(close.columns.values == best.values[:, None], index=close.index, columns=close.columns)
+    weights = is_best.mul(best_ret > 0, axis=0).astype(float)
 
     # only change the holding on the last trading day of each month, carry it otherwise
     month_end = close.index.to_series().groupby(close.index.tz_localize(None).to_period("M")).transform("max") == close.index
@@ -40,10 +39,8 @@ if __name__ == "__main__":
     close = closes(ohlcv)
     print(f"{close.index[0].date()} to {close.index[-1].date()}, {len(close)} days\n")
 
-    rows = {}
-    for lb, r in run_lookbacks(close).items():
-        rows[f"dual momentum {lb}d"] = summary(r.loc[close.index[max(LOOKBACKS)]:])   # same window for all
-    start = close.index[max(LOOKBACKS)]
+    start = close.index[max(LOOKBACKS)]   # same window for all
+    rows = {f"dual momentum {lb}d": summary(r.loc[start:]) for lb, r in run_lookbacks(close).items()}
     for sym in UNIVERSE:
         rows[f"buy&hold {sym}"] = summary(close[sym].pct_change().loc[start:].dropna())
     rows["equal-weight all (daily rebal)"] = summary(close.pct_change().loc[start:].mean(axis=1).dropna())
