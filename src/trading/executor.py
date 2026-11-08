@@ -4,12 +4,12 @@ import datetime as dt
 from pathlib import Path
 
 from alpaca.common.exceptions import APIError
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockLatestQuoteRequest
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.enums import OrderSide
 from alpaca.trading.requests import LimitOrderRequest
 from alpaca.trading.models import Order
+
+from src.assets import asset_for
 
 TRADE_LOG_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "orders" / "trade_log.csv"
 TRADE_LOG_FIELDS = [
@@ -35,79 +35,78 @@ def find_strategy_start_date() -> dt.date | None:
     return dt.datetime.fromisoformat(first["timestamp"]).date()
 
 
-def get_latest_quote(data_client: StockHistoricalDataClient, symbol: str):
-    quote = data_client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=symbol))[symbol]  # type: ignore[reportAttributeAccessIssue]
-
-    # outside regular trading hours the "latest quote" snapshot can come back with one side
-    # empty (e.g. ask_price=0.0 right after close, since no resting ask exists at that instant)
-    # -- trading off a $0.00 price would produce a nonsensical order size or limit price, so
-    # this fails loudly instead. In practice this should only fire if run_daily runs when
-    # check_market_open() would already say the market is closed.
-    if quote.bid_price <= 0 or quote.ask_price <= 0:  # type: ignore[reportAttributeAccessIssue]
-        raise ValueError(
-            f"Latest quote for {symbol} is missing a bid or ask (bid={quote.bid_price}, "  # type: ignore[reportAttributeAccessIssue]
-            f"ask={quote.ask_price}) -- likely called outside regular trading hours."  # type: ignore[reportAttributeAccessIssue]
-        )
-    return quote
-
-
-def get_target_shares(trading_client: TradingClient, data_client: StockHistoricalDataClient,
-                       symbol: str, signal: int, allocation_pct: float, leverage_multiplier: float = 1.0) -> int:
-    if signal == 0:
-        return 0
-
-    account = trading_client.get_account()
-    equity = float(account.equity)  # type: ignore[reportAttributeAccessIssue]
-    quote = get_latest_quote(data_client, symbol)
-
-    # leverage_multiplier sizes off total equity times the leverage factor (e.g. 2.0 for 2x
-    # overnight Reg T margin), not off account.buying_power/regt_buying_power directly --
-    # those reflect *remaining* capacity after any existing position, and Alpaca's own
-    # account.multiplier can read 4 even on a small paper account (it simulates a >$25k
-    # pattern-day-trader account regardless of actual equity, which a real live account this
-    # size would not get) -- so this computes the intended target explicitly instead of
-    # trusting either field to already mean what we want
-    target_dollar_exposure = equity * allocation_pct * leverage_multiplier
-
-    # whole shares only -- fractional/notional orders are a simplification left for later,
-    # since notional orders on Alpaca are restricted to market orders, not the limit orders used here
-    return int(target_dollar_exposure // quote.ask_price)
-
-
-def get_current_shares(trading_client: TradingClient, symbol: str) -> int:
+def get_current_qty(trading_client: TradingClient, asset, symbol: str) -> float:
+    """Open position size (shares or coins); 0 when flat. Works for stocks and crypto."""
     try:
-        position = trading_client.get_open_position(symbol)
-        return int(float(position.qty))  # type: ignore[reportAttributeAccessIssue]
+        position = trading_client.get_open_position(asset.position_symbol(symbol))
+        return float(position.qty)  # type: ignore[reportAttributeAccessIssue]
     except APIError as e:
         # matched on the same stable numeric code risk_manager.flatten_position() uses --
         # GET and DELETE /positions/{symbol} return different message text for "no position"
         # ("position does not exist" vs "position not found: AAPL") but share this code
         if e.code == 40410000:
-            return 0
+            return 0.0
         raise
 
 
-def submit_rebalance_order(trading_client: TradingClient, data_client: StockHistoricalDataClient,
-                            symbol: str, strategy: str, signal: int,
-                            target_shares: int, current_shares: int, id_suffix: str = "") -> Order | None:
-    delta = target_shares - current_shares
+def get_current_shares(trading_client: TradingClient, symbol: str) -> int:
+    # whole-share stock view, used by the AAPL-specific EOD summary and dashboard
+    return int(get_current_qty(trading_client, asset_for(symbol), symbol))
+
+
+def get_target_qty(equity: float, asset, symbol: str, weight: float, allocation_pct: float,
+                   current_qty: float = 0.0, buying_power: float | None = None) -> float:
+    """Quantity that makes the position `weight` x `allocation_pct` of account equity.
+
+    weight is the strategy's target (0 = flat, 1 = 1x, 2 = 2x leverage). Sized off total equity,
+    not account.buying_power: buying power reflects *remaining* capacity after any existing
+    position, so it would shrink the target every time we already hold some.
+
+    buying_power (crypto only) caps how much *more* we can buy: crypto cannot use margin, so a
+    cash-poor account (e.g. fully levered in stocks) gets a smaller order instead of a rejection.
+    """
+    if weight <= 0:
+        return 0
+    _, ask = asset.get_quote(symbol)
+    target = asset.normalize_qty(equity * allocation_pct * weight / ask)
+    if buying_power is not None and target > current_qty:
+        affordable = current_qty + asset.normalize_qty(buying_power * 0.98 / ask)  # 2% cushion for the limit offset
+        target = min(target, affordable)
+    return target
+
+
+def order_id_bucket(interval: str, now: dt.datetime | None = None) -> str:
+    # one order id per strategy per bar: a duplicate cron dispatch inside the same bar is skipped
+    # as a duplicate, while the next bar (next hour, next day) may trade again
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if interval == "1d":
+        return now.date().isoformat()
+    return now.strftime({"1h": "%Y%m%dT%H", "30m": "%Y%m%dT%H%M", "15m": "%Y%m%dT%H%M", "5m": "%Y%m%dT%H%M"}[interval])
+
+
+def submit_rebalance_order(trading_client: TradingClient, asset, symbol: str, strategy: str,
+                           target_qty: float, current_qty: float, id_suffix: str = "",
+                           interval: str = "1d") -> Order | None:
+    delta = target_qty - current_qty
     if delta == 0:
         return None
 
     side = OrderSide.BUY if delta > 0 else OrderSide.SELL
-    qty = abs(delta)
+    qty = asset.normalize_qty(abs(delta))
+    if qty <= 0:
+        return None
 
-    quote = get_latest_quote(data_client, symbol)
+    bid, ask = asset.get_quote(symbol)
     # marketable limit: through the market enough to fill almost immediately on a liquid name,
-    # while still capping the worst-case execution price against a bad print at the open
-    limit_price = round(quote.ask_price * 1.001, 2) if side == OrderSide.BUY else round(quote.bid_price * 0.999, 2)
+    # while still capping the worst-case execution price against a bad print
+    limit_price = asset.round_price(ask * 1.001) if side == OrderSide.BUY else asset.round_price(bid * 0.999)
 
-    # id_suffix lets a same-day risk cut coexist with the morning's rebalance order, which
+    # id_suffix lets a same-day risk cut coexist with the regular rebalance order, which
     # would otherwise collide on this id and be silently skipped as a "duplicate"
-    client_order_id = f"{symbol}-{strategy}-{dt.date.today().isoformat()}" + (f"-{id_suffix}" if id_suffix else "")
+    client_order_id = f"{symbol.replace('/', '')}-{strategy}-{order_id_bucket(interval)}" + (f"-{id_suffix}" if id_suffix else "")
     request = LimitOrderRequest(
         symbol=symbol, qty=qty, side=side, type="limit",
-        time_in_force=TimeInForce.DAY, limit_price=limit_price,
+        time_in_force=asset.time_in_force, limit_price=limit_price,
         client_order_id=client_order_id,
     )
 
@@ -115,7 +114,7 @@ def submit_rebalance_order(trading_client: TradingClient, data_client: StockHist
         return trading_client.submit_order(request)  # type: ignore[reportReturnType]
     except APIError as e:
         if "client_order_id" in str(e).lower() or "already exists" in str(e).lower():
-            print(f"Order for {client_order_id} already submitted today -- skipping duplicate.")
+            print(f"Order for {client_order_id} already submitted for this bar -- skipping duplicate.")
             return None
         raise
 

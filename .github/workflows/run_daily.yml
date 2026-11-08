@@ -80,6 +80,8 @@ jobs:
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          ALPACA_CRYPTO_API_KEY: ${{ secrets.ALPACA_CRYPTO_API_KEY }}
+          ALPACA_CRYPTO_API_SECRET: ${{ secrets.ALPACA_CRYPTO_API_SECRET }}
         run: python -m src.dashboard.build_dashboard
 
       - uses: actions/configure-pages@v6.0.0

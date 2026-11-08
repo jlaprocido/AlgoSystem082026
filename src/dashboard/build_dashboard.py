@@ -6,11 +6,15 @@ import statistics
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from alpaca.trading.enums import QueryOrderStatus
+from alpaca.trading.requests import GetOrdersRequest
+
 from src.bar_config import BAR_CONFIG
-from src.config import get_alpaca_trading_client
-from src.data.market_data import get_bars
+from src.assets import asset_for
+from src.config import crypto_account_configured, get_alpaca_crypto_trading_client, get_alpaca_trading_client
+from src.dashboard import performance
 from src.risk import risk_manager as rm
-from src.strategy import aapl_sma
+from src.strategy.registry import REGISTRY, Strategy
 from src.trading import executor
 
 # Static-site generator, not a server -- run once per workflow invocation (run_daily,
@@ -33,7 +37,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="1800">
-<title>{symbol} SMA Bot | James Laprocido</title>
+<title>Algo Portfolio | James Laprocido</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600;6..72,700&display=swap" rel="stylesheet">
@@ -82,6 +86,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     padding: 12px 16px; border-radius: 4px; margin-bottom: 24px; font-weight: 600;
   }}
   .stats {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; }}
+  .stats.four {{ grid-template-columns: repeat(4, 1fr); }}
   .stat {{ background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 16px 20px; }}
   .stat .label {{ color: var(--muted); font: 600 .75rem var(--sans); letter-spacing: 0.12em; text-transform: uppercase; }}
   .stat .value {{ font: 500 1.9rem/1.2 var(--serif); margin-top: 4px; }}
@@ -96,6 +101,16 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .swatch {{ display: inline-block; width: 14px; height: 3px; border-radius: 2px; }}
   .axis-label {{ fill: var(--muted); font-size: 11px; font-family: var(--sans); }}
   .grid-line {{ stroke: var(--rule); stroke-width: 1; }}
+
+  h2.section {{ font: 500 1.6rem/1.2 var(--serif); margin: 8px 0 16px; letter-spacing: -0.01em; }}
+  .strategy-head {{ display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }}
+  .tag {{ display: inline-block; font: 600 .7rem var(--sans); letter-spacing: 0.1em; text-transform: uppercase;
+          background: var(--soft); color: var(--ink); border-radius: 3px; padding: 2px 8px; margin-left: 6px; }}
+  .tag.crypto {{ background: #fdf1d8; }}
+  .mini-stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 12px 0 16px; }}
+  .mini .label {{ color: var(--muted); font: 600 .7rem var(--sans); letter-spacing: 0.1em; text-transform: uppercase; }}
+  .mini .value {{ font: 500 1.3rem/1.3 var(--serif); }}
+  .status-line {{ font-size: 0.85rem; color: var(--muted); margin-top: 10px; }}
 
   .table-wrap {{ max-height: 420px; overflow: auto; border: 1px solid var(--rule); border-radius: 4px; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
@@ -115,7 +130,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   footer {{ background: var(--hero); color: #cfe3da; border-top: 6px solid var(--sky); margin-top: 24px; padding: 24px 0; font-size: 0.85rem; }}
 
   @media (max-width: 640px) {{
-    .stats {{ grid-template-columns: repeat(2, 1fr); }}
+    .stats, .stats.four {{ grid-template-columns: repeat(2, 1fr); }}
+    .mini-stats {{ grid-template-columns: repeat(2, 1fr); }}
     .btn {{ flex: 1 1 100%; }}
   }}
 </style>
@@ -130,7 +146,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <section class="hero">
     <div class="wrap">
       <p class="eyebrow">Live paper trading</p>
-      <h1>{symbol} SMA Bot</h1>
+      <h1>Algo Portfolio</h1>
       <div class="actions">
         <a class="btn" href="{portfolio_url}">&larr; Portfolio</a>
         <a class="btn btn--line" href="{repo_url}">View code</a>
@@ -140,26 +156,16 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </section>
   <main>
     <div class="wrap">
-      {halted_banner}
-      <div class="stats">
-        <div class="stat"><div class="label">Equity</div><div class="value">${equity:,.2f}</div></div>
-        <div class="stat"><div class="label">Today's PnL</div><div class="value {pnl_class}">{daily_pnl_pct:+.2%}</div></div>
-        <div class="stat"><div class="label">Total PnL</div><div class="value {total_pnl_class}">{total_pnl_display}</div></div>
-        <div class="stat"><div class="label">Drawdown from Peak</div><div class="value">{drawdown_pct:.2%}</div></div>
-        <div class="stat"><div class="label">Sharpe Ratio</div><div class="value">{sharpe_display}</div></div>
-        <div class="stat"><div class="label">Position</div><div class="value">{current_shares} sh</div></div>
-      </div>
-      <div class="card">
-        <h2>Equity vs. {symbol} Buy &amp; Hold</h2>
-        <div class="subhead">{chart_subhead}</div>
-        {equity_svg}
-      </div>
+      {headline_tiles}
+      {account_sections}
+      <h2 class="section">Strategies</h2>
+      {strategy_cards}
       <div class="card">
         <h2>Recent Activity</h2>
         <div class="subhead">{trade_count} entries, newest first. Scroll for the full log.</div>
         <div class="table-wrap">
         <table>
-          <thead><tr><th>Date &amp; Time (UTC)</th><th>Signal</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Status</th></tr></thead>
+          <thead><tr><th>Date &amp; Time (UTC)</th><th>Strategy</th><th>Symbol</th><th>Signal</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Status</th></tr></thead>
           <tbody>
             {trade_rows}
           </tbody>
@@ -171,8 +177,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <footer>
     <div class="wrap">
       Paper trading via Alpaca. Not investment advice.<br>
-      This page reloads in your browser every 30 minutes, but the numbers only change when the bot
-      actually runs (see "Last updated" above) -- roughly hourly during market hours, less often outside it.
+      Each strategy's curve is rebuilt from its own filled orders at daily closes, with its sleeve of the account
+      as starting capital (so a 2x strategy's swings show up at 2x). It ignores crypto fees that Alpaca takes in coins.
+      The page reloads every 30 minutes, but numbers only change when a bot runs (see "Last updated").
     </div>
   </footer>
 </body>
@@ -188,7 +195,7 @@ def _nice_ticks(lo: float, hi: float, count: int = 5) -> list[float]:
 
 
 def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: list[float] | None,
-                     width: int = 780, height: int = 240) -> str:
+                     width: int = 780, height: int = 240, strategy_label: str = "Strategy") -> str:
     if len(equity_values) < 2:
         return "<p class='muted'>Not enough history yet.</p>"
 
@@ -212,11 +219,12 @@ def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: l
 
     # y-axis: auto-scaled gridlines + $ labels from the actual combined data range
     y_ticks = _nice_ticks(lo, hi, 5)
+    money = "${:,.0f}" if span >= 50 else "${:,.2f}"  # small sleeves (a few hundred dollars) need cents
     y_axis_svg = []
     for v in y_ticks:
         _, y = to_xy(0, v)
         y_axis_svg.append(f'<line x1="{margin_left}" y1="{y:.1f}" x2="{width - margin_right}" y2="{y:.1f}" class="grid-line"/>')
-        y_axis_svg.append(f'<text x="{margin_left - 8}" y="{y + 4:.1f}" text-anchor="end" class="axis-label">${v:,.0f}</text>')
+        y_axis_svg.append(f'<text x="{margin_left - 8}" y="{y + 4:.1f}" text-anchor="end" class="axis-label">{money.format(v)}</text>')
 
     # x-axis: 5 evenly spaced date labels, auto-scaled to the actual date range
     x_axis_svg = []
@@ -235,7 +243,7 @@ def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: l
 
     legend = (
         '<div class="legend">'
-        f'<span><span class="swatch" style="background:{STRATEGY_COLOR}"></span>Strategy</span>'
+        f'<span><span class="swatch" style="background:{STRATEGY_COLOR}"></span>{strategy_label}</span>'
     )
     if benchmark_values:
         legend += f'<span><span class="swatch" style="background:{BENCHMARK_COLOR}"></span>Buy &amp; Hold</span>'
@@ -249,7 +257,7 @@ def build_chart_svg(dates: list, equity_values: list[float], benchmark_values: l
     return svg + legend
 
 
-def compute_sharpe_ratio(equity_values: list) -> float | None:
+def compute_sharpe_ratio(equity_values: list, periods_per_year: int | None = None) -> float | None:
     # same (mean / std) * sqrt(bars_per_year) convention used throughout tests/ -- daily
     # portfolio history here plays the role a strategy's daily 'return' column plays there.
     # Returns None (rendered as "N/A") rather than 0 when there's not enough history yet or
@@ -266,7 +274,7 @@ def compute_sharpe_ratio(equity_values: list) -> float | None:
     if std_r == 0:
         return None
 
-    bars_per_year = BAR_CONFIG["1d"]["bars_per_year"]
+    bars_per_year = periods_per_year or BAR_CONFIG["1d"]["bars_per_year"]
     return (statistics.mean(returns) / std_r) * math.sqrt(bars_per_year)
 
 
@@ -278,7 +286,7 @@ def build_benchmark_series(symbol: str, dates: list) -> list[float] | None:
         return None
 
     try:
-        df = get_bars(symbol, dates[0], dates[-1] + dt.timedelta(days=1), interval="1d")
+        df = asset_for(symbol).get_bars(symbol, dates[0], dates[-1] + dt.timedelta(days=1), "1d")  # stock or crypto
     except Exception as e:
         print(f"Could not fetch benchmark data for {symbol}: {e}")
         return None
@@ -327,7 +335,7 @@ def format_status(raw: str) -> str:
 
 def build_trade_rows_html(trades: list[dict]) -> str:
     if not trades:
-        return '<tr><td colspan="6" class="muted">No activity logged yet.</td></tr>'
+        return '<tr><td colspan="8" class="muted">No activity logged yet.</td></tr>'
 
     signal_names = {"1": "Long", "0": "Flat"}
     rows = []
@@ -336,6 +344,8 @@ def build_trade_rows_html(trades: list[dict]) -> str:
         side_class = "side-buy" if side == "buy" else ("side-sell" if side == "sell" else "muted")
         raw_price = t.get("filled_avg_price") or t.get("limit_price") or ""
         price = f"${float(raw_price):,.2f}" if raw_price else "&mdash;"
+        strategy = html.escape(performance.canonical_strategy(t.get("strategy", "")))
+        symbol = html.escape(t.get("symbol", ""))
         qty = t.get("qty") or ""
         qty_display = html.escape(qty) if qty and qty != "0" else "&mdash;"
         signal = signal_names.get(t.get("signal", ""), "&mdash;")
@@ -344,6 +354,8 @@ def build_trade_rows_html(trades: list[dict]) -> str:
         rows.append(
             "<tr>"
             f"<td>{html.escape(format_timestamp(t.get('timestamp', '')))}</td>"
+            f"<td>{strategy}</td>"
+            f"<td>{symbol}</td>"
             f"<td>{signal}</td>"
             f"<td class='{side_class}'>{html.escape(side.capitalize()) if side else '&mdash;'}</td>"
             f"<td class='num'>{qty_display}</td>"
@@ -354,85 +366,266 @@ def build_trade_rows_html(trades: list[dict]) -> str:
     return "\n".join(rows)
 
 
-def run() -> None:
-    trading_client = get_alpaca_trading_client()
-    symbol = aapl_sma.SYMBOL
 
-    account = trading_client.get_account()
-    equity = float(account.equity)  # type: ignore[reportAttributeAccessIssue]
-    last_equity = float(account.last_equity)  # type: ignore[reportAttributeAccessIssue]
-    daily_pnl_pct = (equity - last_equity) / last_equity if last_equity > 0 else 0.0
+
+def _signed(value: float, pct: bool = True) -> tuple[str, str]:
+    """(text, css class) for a number that is good when positive."""
+    text = f"{value:+.2%}" if pct else f"{'+' if value >= 0 else '-'}${abs(value):,.2f}"
+    return text, "positive" if value >= 0 else "negative"
+
+
+def _fmt_qty(st: Strategy, symbol: str, qty: float) -> str:
+    if st.asset.name == "stock":
+        return f"{int(qty)} sh"
+    return f"{qty:.6f}".rstrip("0").rstrip(".") + " " + symbol.split("/")[0]
+
+
+def _mini(label: str, value: str, css: str = "") -> str:
+    return f'<div class="mini"><div class="label">{label}</div><div class="value {css}">{value}</div></div>'
+
+
+def equity_on(dates: list, equity: list[float], day: dt.date, fallback: float) -> float:
+    """Account equity at the close of `day` (or the nearest earlier point)."""
+    earlier = [e for d, e in zip(dates, equity) if d <= day]
+    return earlier[-1] if earlier else (equity[0] if equity else fallback)
+
+
+def build_strategy_card(st: Strategy, fills: list[dict], closes: dict[str, dict], capital: float,
+                        positions: dict, latest: dict | None, end: dt.date) -> str:
+    asset = st.asset
+    lev = f" &middot; {st.leverage:g}x" if st.leverage != 1 else ""
+    subhead = (f"{html.escape(', '.join(st.symbols))} &middot; {st.interval} bars &middot; "
+               f"sleeve {st.allocation_pct:.0%} of equity{lev}")
+
+    held = [(s, positions.get(asset.position_symbol(s))) for s in st.symbols]
+    held = [(s, p) for s, p in held if p is not None and float(p.qty) != 0]  # type: ignore[reportAttributeAccessIssue]
+    if held:
+        position = "<br>".join(_fmt_qty(st, s, float(p.qty)) for s, p in held)  # type: ignore[reportAttributeAccessIssue]
+        position_value = sum(float(p.market_value) for _, p in held)  # type: ignore[reportAttributeAccessIssue]
+        position += f' <span class="muted" style="font-size:.8rem">(${position_value:,.2f})</span>'
+    else:
+        position = "Flat"
+
+    if latest:
+        signal = {"1": "Long", "0": "Flat"}.get(latest.get("signal", ""), "&mdash;")
+        status_line = (f"Last run: {html.escape(format_timestamp(latest.get('timestamp', '')))} UTC &middot; "
+                       f"signal {signal} &middot; {html.escape(format_status(latest.get('status', '')))}")
+    else:
+        status_line = "Not run yet &mdash; waiting for the first scheduled run."
+
+    if not fills:
+        minis = _mini("Position", position) + _mini("Trades", "0") + _mini("Return", "N/A") + _mini("Sleeve", f"${capital:,.0f}")
+        chart = "<p class='muted'>No filled trades yet, so there is no curve to draw. It appears after the first fill.</p>"
+        body_sub = "Waiting for its first trade"
+    else:
+        dates, values, bench = performance.strategy_curve(fills, closes, capital, end)
+        ret = values[-1] / capital - 1
+        bench_ret = bench[-1] / capital - 1
+        ppy = asset.bars_per_year["1d"]
+        sharpe = performance.sharpe(values, ppy)
+        ret_txt, ret_css = _signed(ret)
+        pnl_txt, pnl_css = _signed(values[-1] - capital, pct=False)
+        edge_txt, edge_css = _signed(ret - bench_ret)
+        minis = (
+            _mini("Return on sleeve", ret_txt, ret_css)
+            + _mini("vs. Buy &amp; Hold", edge_txt, edge_css)
+            + _mini("PnL", pnl_txt, pnl_css)
+            + _mini("Position", position)
+            + _mini("Sharpe", f"{sharpe:.2f}" if sharpe is not None else "N/A")
+            + _mini("Max drawdown", f"{performance.max_drawdown(values):.2%}")
+            + _mini("Trades", str(len(fills)))
+            + _mini("Buy &amp; Hold", f"{bench_ret:+.2%}")
+        )
+        chart = build_chart_svg(dates, values, bench, height=190, strategy_label=html.escape(st.name))
+        body_sub = f"Since {dates[0].strftime('%b %d, %Y')} (first fill)"
+
+    return (
+        '<div class="card">'
+        f'<div class="strategy-head"><h2>{html.escape(st.name)}<span class="tag {asset.name}">{asset.name}</span></h2>'
+        f'<div class="subhead">{subhead}</div></div>'
+        f'<div class="subhead">{body_sub}</div>'
+        f'<div class="mini-stats">{minis}</div>{chart}'
+        f'<div class="status-line">{status_line}</div>'
+        '</div>'
+    )
+
+
+def fetch_closes(st: Strategy, start: dt.date, end: dt.date) -> dict[str, dict]:
+    """Daily closes per symbol; a data failure leaves that symbol out (the card falls back to fill prices)."""
+    out = {}
+    for sym in st.symbols:
+        try:
+            df = st.asset.get_bars(sym, start, end + dt.timedelta(days=1), "1d")
+            out[sym] = {row.timestamp.date(): row.close for row in df.itertuples()}  # type: ignore[reportAttributeAccessIssue]
+        except Exception as e:
+            print(f"Could not fetch prices for {sym}: {e}")
+    return out
+
+
+ACCOUNTS = {
+    "stock": {"title": "Stock account", "benchmark": "SPY", "benchmark_name": "SPY"},
+    "crypto": {"title": "Crypto account", "benchmark": "BTC/USD", "benchmark_name": "BTC"},
+}
+
+
+def get_clients() -> dict[str, object]:
+    """One Alpaca client per account. Crypto is a separate account; without its keys it is left out."""
+    clients: dict[str, object] = {"stock": get_alpaca_trading_client()}
+    if crypto_account_configured():
+        clients["crypto"] = get_alpaca_crypto_trading_client()
+    return clients
+
+
+def fetch_fills(client, account: str) -> dict[str, list[dict]]:
+    """Every filled order in one account, grouped by the strategy that owns the symbol. Read from
+    Alpaca rather than the trade log, which never records the fills of risk liquidations (see
+    performance.py). Orders keep BTC/USD while positions say BTCUSD, so orders match registry symbols."""
+    owner = {sym: st.name for st in REGISTRY.values() if st.allocation_pct > 0 and st.asset.name == account
+             for sym in st.symbols}
+    orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, limit=500))  # type: ignore[reportAttributeAccessIssue]
+    if len(orders) >= 500:
+        print(f"Warning: hit Alpaca's 500-order page limit in the {account} account -- older fills are missing.")
+    return performance.fills_from_orders(orders, owner)  # type: ignore[reportArgumentType]
+
+
+def load_account(account: str, client, today: dt.date) -> dict:
+    """Everything the page needs from one Alpaca account."""
+    info = client.get_account()
+    equity = float(info.equity)  # type: ignore[reportAttributeAccessIssue]
+    last_equity = float(info.last_equity)  # type: ignore[reportAttributeAccessIssue]
+    positions = {p.symbol: p for p in client.get_all_positions()}  # type: ignore[reportAttributeAccessIssue]
 
     # max_drawdown_pct=1.0 means this can never "breach" -- reusing check_max_drawdown purely
-    # for the current drawdown-from-peak number it already computes, read-only, same pattern
-    # eod_summary.py uses
-    _, drawdown_pct = rm.check_max_drawdown(trading_client, max_drawdown_pct=1.0)
-    current_shares = executor.get_current_shares(trading_client, symbol)
-    halted = rm.is_halted()
+    # for the current drawdown-from-peak number it already computes, read-only
+    _, drawdown_pct = rm.check_max_drawdown(client, max_drawdown_pct=1.0)  # type: ignore[reportArgumentType]
 
     # dates/equity here already has Alpaca's pre-funding 0.0 padding stripped (see
-    # get_real_equity_history's docstring) -- but the account can still sit funded-and-flat
-    # for a while before the strategy's first real trade, so this trims further to start
-    # exactly where the strategy itself started, not just where the account started. Both the
-    # chart and every metric derived from it (Sharpe, Total PnL below) use this same window,
-    # so "how has the strategy done" never gets diluted by weeks of doing nothing first.
-    all_dates, all_equity = rm.get_real_equity_history(trading_client)
+    # get_real_equity_history's docstring). The history only has completed sessions, so today's
+    # live equity is added as the last point so the chart ends on the same number as the Equity
+    # tile. Stocks skip weekends (no session); crypto trades every day, so it never skips.
+    dates, equity_hist = rm.get_real_equity_history(client)  # type: ignore[reportArgumentType]
+    if (account == "crypto" or today.weekday() < 5) and (not dates or dates[-1] < today):
+        dates, equity_hist = dates + [today], equity_hist + [equity]
 
-    # the history only has completed sessions -- add today's live equity as the last point so
-    # the chart ends on the same number as the Equity tile (skipped on weekends: no session)
-    today = dt.datetime.now(ZoneInfo("America/New_York")).date()  # session date, not UTC date
-    if today.weekday() < 5 and (not all_dates or all_dates[-1] < today):
-        all_dates, all_equity = all_dates + [today], all_equity + [equity]
+    return {
+        "name": account, "equity": equity, "last_equity": last_equity, "positions": positions,
+        "drawdown_pct": drawdown_pct, "halted": rm.is_halted(account), "dates": dates, "equity_hist": equity_hist,
+        "fills": fetch_fills(client, account),
+    }
 
-    strategy_start = executor.find_strategy_start_date()
-    if strategy_start:
-        trimmed = [(d, e) for d, e in zip(all_dates, all_equity) if d >= strategy_start]
-        dates = [d for d, _ in trimmed]
-        equity_series = [e for _, e in trimmed]
+
+def _stat(label: str, value: str, css: str = "") -> str:
+    return f'<div class="stat"><div class="label">{label}</div><div class="value {css}">{value}</div></div>'
+
+
+def build_account_section(acct: dict) -> tuple[str, float, float]:
+    """(html, equity at the start of the trading window, equity now) for one account."""
+    cfg = ACCOUNTS[acct["name"]]
+    equity = acct["equity"]
+    daily = (equity - acct["last_equity"]) / acct["last_equity"] if acct["last_equity"] > 0 else 0.0
+
+    # trim to where trading started, not where the account was funded: an account can sit flat for
+    # weeks first, and counting that idle stretch would dilute Sharpe and the buy-and-hold comparison
+    first_fills = [f["date"] for fills in acct["fills"].values() for f in fills]
+    start = min(first_fills) if first_fills else None
+    if start:
+        trimmed = [(d, e) for d, e in zip(acct["dates"], acct["equity_hist"]) if d >= start]
+        dates, series = [d for d, _ in trimmed], [e for _, e in trimmed]
     else:
-        dates, equity_series = all_dates, all_equity
+        dates, series = acct["dates"], acct["equity_hist"]
+    start_equity = series[0] if series else equity
+    total_pct = equity / start_equity - 1 if series else None
 
-    total_pnl_pct = None
-    if len(equity_series) >= 1:
-        total_pnl_pct = equity / equity_series[0] - 1
-
+    benchmark, subhead = None, "Not enough history yet -- no trades placed"
     if len(dates) >= 2:
-        benchmark_ratios = build_benchmark_series(symbol, dates)
-        benchmark_series = [equity_series[0] * r for r in benchmark_ratios] if benchmark_ratios else None
-
-        since_label = "first trade" if strategy_start else "account funded, no trades yet"
-        chart_subhead = f"Since {dates[0].strftime('%b %d, %Y')} ({since_label})"
-        if benchmark_ratios:
-            benchmark_return = benchmark_ratios[-1] - 1
-            chart_subhead += f" -- Strategy {total_pnl_pct:+.2%} vs. Buy & Hold {benchmark_return:+.2%}"
+        ratios = build_benchmark_series(cfg["benchmark"], dates)
+        benchmark = [series[0] * r for r in ratios] if ratios else None
+        subhead = f"Since {dates[0].strftime('%b %d, %Y')} ({'first trade' if start else 'account funded, no trades yet'})"
+        if ratios:
+            subhead += f" -- Account {total_pct:+.2%} vs. {cfg['benchmark_name']} Buy & Hold {ratios[-1] - 1:+.2%}"
     else:
-        dates, equity_series, benchmark_series = [], [], None
-        chart_subhead = "Not enough history yet -- no trades placed"
+        dates, series = [], []
 
-    equity_svg = build_chart_svg(dates, equity_series, benchmark_series)
-    sharpe_ratio = compute_sharpe_ratio(equity_series)
+    ppy = ACCOUNT_PERIODS_PER_YEAR[acct["name"]]
+    sharpe = compute_sharpe_ratio(series, ppy)
+    banner = ('<div class="halted-banner">HALTED -- max drawdown previously breached in the '
+              f'{acct["name"]} account, awaiting manual review</div>' if acct["halted"] else "")
+    tiles = (
+        _stat("Equity", f"${equity:,.2f}")
+        + _stat("Today's PnL", f"{daily:+.2%}", "positive" if daily >= 0 else "negative")
+        + _stat("Total PnL", f"{total_pct:+.2%}" if total_pct is not None else "N/A",
+                ("positive" if total_pct >= 0 else "negative") if total_pct is not None else "")
+        + _stat("Drawdown from Peak", f"{acct['drawdown_pct']:.2%}")
+        + _stat("Sharpe Ratio", f"{sharpe:.2f}" if sharpe is not None else "N/A")
+        + _stat("Open Positions", str(len(acct["positions"])))
+    )
+    chart = build_chart_svg(dates, series, benchmark, strategy_label=cfg["title"])
+    section = (
+        f'<h2 class="section">{cfg["title"]}</h2>{banner}<div class="stats">{tiles}</div>'
+        f'<div class="card"><h2>{cfg["title"]} Equity vs. {cfg["benchmark_name"]} Buy &amp; Hold</h2>'
+        f'<div class="subhead">{subhead}</div>{chart}</div>'
+    )
+    return section, start_equity, equity
 
-    trades = read_all_trades()
+
+ACCOUNT_PERIODS_PER_YEAR = {"stock": 252, "crypto": 365}
+
+
+def run() -> None:
+    today = dt.datetime.now(ZoneInfo("America/New_York")).date()  # session date, not UTC date
+    accounts = {name: load_account(name, client, today) for name, client in get_clients().items()}
+
+    sections, starts, nows, last = [], 0.0, 0.0, 0.0
+    for acct in accounts.values():
+        section, start_equity, now = build_account_section(acct)
+        sections.append(section)
+        starts, nows, last = starts + start_equity, nows + now, last + acct["last_equity"]
+    if "crypto" not in accounts:
+        sections.append('<p class="muted">Crypto account not configured (set ALPACA_CRYPTO_API_KEY / ALPACA_CRYPTO_API_SECRET): '
+                        "crypto strategies are not trading.</p>")
+
+    daily = (nows - last) / last if last > 0 else 0.0
+    total_pct = nows / starts - 1 if starts > 0 else None
+    n_positions = sum(len(a["positions"]) for a in accounts.values())
+    headline = (
+        '<div class="stats four">'
+        + _stat("Total Equity", f"${nows:,.2f}")
+        + _stat("Today's PnL", f"{daily:+.2%}", "positive" if daily >= 0 else "negative")
+        + _stat("Total PnL", f"{total_pct:+.2%}" if total_pct is not None else "N/A",
+                ("positive" if total_pct >= 0 else "negative") if total_pct is not None else "")
+        + _stat("Open Positions", str(n_positions))
+        + "</div>"
+    )
+
+    trades = read_all_trades()  # newest first
+    latest = {}
+    for t in trades:  # first hit per strategy = its newest row
+        latest.setdefault(performance.canonical_strategy(t.get("strategy", "")), t)
+
+    cards = []
+    for st in REGISTRY.values():
+        if st.allocation_pct <= 0:
+            continue  # research-only: backtest with src.backtest.lab, no live card
+        acct = accounts.get(st.asset.name)
+        mine = acct["fills"].get(st.name, []) if acct else []
+        start = mine[0]["date"] if mine else today
+        # capital = this strategy's sleeve of ITS account as it stood when the strategy started
+        base = equity_on(acct["dates"], acct["equity_hist"], start, acct["equity"]) if acct else 0.0
+        capital = st.allocation_pct * base
+        closes = fetch_closes(st, start, today) if mine else {}
+        cards.append(build_strategy_card(st, mine, closes, capital, acct["positions"] if acct else {},
+                                         latest.get(st.name), today))
+    research = [s.name for s in REGISTRY.values() if s.allocation_pct <= 0]
+    if research:
+        cards.append(f'<p class="muted">Research-only (backtest, not trading): {html.escape(", ".join(research))}</p>')
 
     html_out = PAGE_TEMPLATE.format(
-        symbol=symbol,
         portfolio_url=PORTFOLIO_URL,
         repo_url=REPO_URL,
         updated_at=dt.datetime.now(dt.timezone.utc).strftime("%m-%d-%Y %H:%M:%S"),
-        halted_banner=(
-            '<div class="halted-banner">HALTED -- max drawdown previously breached, '
-            "awaiting manual review</div>" if halted else ""
-        ),
-        equity=equity,
-        daily_pnl_pct=daily_pnl_pct,
-        pnl_class="positive" if daily_pnl_pct >= 0 else "negative",
-        total_pnl_display=f"{total_pnl_pct:+.2%}" if total_pnl_pct is not None else "N/A",
-        total_pnl_class=("positive" if total_pnl_pct >= 0 else "negative") if total_pnl_pct is not None else "",
-        drawdown_pct=drawdown_pct,
-        sharpe_display=f"{sharpe_ratio:.2f}" if sharpe_ratio is not None else "N/A",
-        current_shares=current_shares,
-        chart_subhead=chart_subhead,
-        equity_svg=equity_svg,
+        headline_tiles=headline,
+        account_sections="\n".join(sections),
+        strategy_cards="\n".join(cards),
         trade_count=len(trades),
         trade_rows=build_trade_rows_html(trades),
     )

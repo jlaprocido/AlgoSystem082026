@@ -17,7 +17,7 @@ Extra
 
 1. `pip install -r requirements.txt`
 2. `pip install -e .` — installs `src` and `tests` as importable packages (see `pyproject.toml`), so `from src.data.market_data import get_bars` and `from tests.donchian.donchian import ...` work no matter where a script is run from.
-3. Copy `.env.example` to `.env` and fill in your real Alpaca API key/secret (required) and, optionally, an `NTFY_TOPIC` for push notifications — see `.env.example` for details on each. `.env` is git-ignored — never commit real credentials. Running via GitHub Actions instead of locally uses the same values, stored as repo Secrets rather than a `.env` file (see "Automation" below).
+3. Copy `.env.example` to `.env` and fill in your real Alpaca API key/secret (required) and, to trade crypto, the key/secret of a *second* Alpaca paper account as `ALPACA_CRYPTO_API_KEY` / `ALPACA_CRYPTO_API_SECRET` (see "Strategies, assets and crypto") and, optionally, an `NTFY_TOPIC` for push notifications — see `.env.example` for details on each. `.env` is git-ignored — never commit real credentials. Running via GitHub Actions instead of locally uses the same values, stored as repo Secrets rather than a `.env` file (see "Automation" below).
 
 ## Project Structure
 
@@ -26,16 +26,26 @@ src/
   config.py           # loads .env, builds the shared Alpaca clients (get_alpaca_client for data,
                        # get_alpaca_trading_client for orders), the ALPACA_PAPER paper/live flag,
                        # and the optional NTFY_TOPIC notification setting
+  assets.py            # ASSET ADAPTER: everything that differs between stocks and crypto (data source,
+                       # whole vs fractional qty, DAY vs GTC, market hours, position symbol, buying power,
+                       # annualization). asset_for("BTC/USD") -> crypto; "AAPL" -> stock
   bar_config.py        # BAR_CONFIG: per-interval constants (annualization, walk-forward retrain cadence)
   data/
     market_data.py      # get_bars(): unified yfinance/Alpaca data fetcher, same output shape either way
   backtest/
+    lab.py              # python -m src.backtest.lab <strategy> [--symbols ..] [--interval ..]: backtest any
+                        # registered strategy vs buy-and-hold, stocks or crypto
     costs.py            # apply_slippage(): shared trading-cost model, used by every strategy backtest
     portfolio.py        # multi-asset harness: load aligned bars, weights table -> net daily returns, summary stats
   strategy/
+    library.py             # every strategy is one function: strategy_fn(ohlcv_dict, **params) -> weights table
+    registry.py            # REGISTRY: name -> strategy function + symbols + interval + params + sleeve size
     aapl_sma.py            # the live, chosen version of tests/sma/sma.py's crossover for AAPL --
                             # given today's bars, what's today's position? (no backtest/optimizer code)
   trading/
+    engine.py              # THE generic runner: run(name) / check(name) for any registered strategy,
+                            # stocks or crypto. run_daily.py and intraday_check.py are thin wrappers
+    run_strategy.py         # CLI entrypoint: python -m src.trading.run_strategy <name> [--dry-run|--check-only]
     executor.py            # order sizing, marketable-limit submission (with client_order_id
                             # idempotency), fill reconciliation, and CSV trade logging
     run_daily.py            # entrypoint: risk checks -> compute signal -> rebalance -> log -> notify.
@@ -69,7 +79,8 @@ data/                   # tracked in git -- see .gitignore's negated patterns an
 public/                 # src/dashboard/build_dashboard.py's output -- gitignored, never
                         # committed, exists only transiently on the runner before Pages upload
 
-.github/workflows/      # run_daily.yml, eod_summary.yml, intraday_check.yml -- see "Automation" below
+
+.github/workflows/      # run_daily.yml, eod_summary.yml, intraday_check.yml (AAPL) and run_strategy.yml (any strategy) -- see "Automation" below
 
 tests/                  # NOTE: this is a strategy research/prototyping area, not pytest unit tests
   bar_permute.py         # Monte Carlo permutation testing utility shared by every strategy below
@@ -135,9 +146,50 @@ Several strategy files (see `tests/mean_reversion/mean_reversion.py` for the cle
 
 What does **not** auto-scale: things like the rolling `window` size or a strategy's parameter-sweep range (e.g. the z-score range in `mean_reversion.py`) are strategy-specific choices, not something derivable from interval alone — "20 bars" means something very different as 20 minutes vs. 20 days, so those still need to be tuned by hand whenever you change `INTERVAL`.
 
+## Strategies, assets and crypto (the engine)
+
+**End goal: beat the market after costs** (see `claude.md`). Everything below exists so a strategy can be tried on any asset, judged against buy-and-hold, and run live (paper) with a config change.
+
+**Every strategy is a function** (`src/strategy/library.py`): `strategy_fn(ohlcv: dict[symbol -> DataFrame], **params) -> weights DataFrame`. Row `t` is the target position decided at bar `t`'s close as a fraction of the strategy's money (0 = flat, 1 = fully invested; 2 = 2x leverage). Shorts are clipped to 0 so crypto (can't short) and stocks (live book is long-only) behave the same in backtest and live. Window sizes are bar counts, so `sma(5, 20)` means 5/20 *days* on daily bars and 5/20 *hours* on hourly bars. These mirror the signal code in `tests/<name>/` (the research versions with grid search and permutation tests).
+
+**The registry** (`src/strategy/registry.py`) names a runnable deployment: function + symbols + interval + params + `allocation_pct` (share of account equity) + `leverage` + daily-move limits. Adding a strategy is one function and one entry. `allocation_pct=0.0` means research-only: backtestable, refused by the live engine, until you promote it.
+
+```
+python -m src.backtest.lab btc_sma                                     # vs buy-and-hold, 25 bps crypto cost
+python -m src.backtest.lab btc_sma --symbols ETH/USD --interval 1h --days 90
+python -m src.backtest.lab --all
+python -m src.trading.run_strategy btc_sma --dry-run                   # what would it do right now?
+python -m src.trading.run_strategy btc_sma                             # trade (paper) once
+python -m src.trading.run_strategy btc_sma --check-only                # risk checks only
+```
+
+**The asset adapter** (`src/assets.py`) is the only place stocks and crypto differ:
+
+| | stocks | crypto |
+|---|---|---|
+| data | Alpaca IEX / yfinance | Alpaca crypto bars (`CryptoHistoricalDataClient`) |
+| quantity | whole shares | fractional, floored to 6 decimals |
+| time in force | DAY | GTC |
+| trading hours | market clock | always open |
+| annualization | 252 days | 365 days |
+| position symbol | `AAPL` | `BTCUSD` (orders use `BTC/USD`) |
+
+**Cadence**: each strategy declares its `interval`; cron-job.org dispatches `run_strategy.yml` with `{"inputs": {"strategy": "btc_sma"}}` at that cadence (any time of day for crypto). 5-minute *data* is available (`--interval 5m`), but a 5-minute decision cadence means 288 GitHub Actions runs a day and a state commit to `main` per run, so crypto strategies default to daily until the lab shows finer bars pay after costs. The one-order-id-per-bar rule (`BTCUSD-btc_sma-<bar>`) makes a duplicate dispatch inside a bar a harmless no-op while the next bar can trade again.
+
+**Crypto trades in its own Alpaca account.** Stocks and crypto are two paper accounts with separate keys (`ALPACA_API_KEY` for stocks, `ALPACA_CRYPTO_API_KEY` for crypto), picked by the asset adapter. They cannot share one: crypto can only be bought with cash, while the 2x AAPL bot borrows to hold twice its equity, so in one account a long AAPL leaves crypto no cash and a held crypto position can get the AAPL order rejected. A crypto strategy with no crypto keys refuses to run; it never falls back to the stock account. Create the second paper account at Alpaca and **set its starting balance to a size you actually want to test** (the default is $100,000, which would dwarf the stock account in the dashboard's headline totals).
+
+**Risk is per strategy, with a kill switch per account**: max drawdown (15%, on that account's equity) flattens every position in that account and halts it until `risk_manager.clear_halt("stock")` or `clear_halt("crypto")`. The two accounts halt independently (`halt_state.json`, `halt_state_crypto.json`). Each strategy has its own daily-move limits and same-day memory in `data/risk/daily_loss_<strategy>.json` (stocks: -2.5% cut to 1x, -5% flatten; crypto: -15% flatten, since 10% days are routine). Crypto reduce-to-1x doesn't apply (no leverage). Because each account is separate, the `allocation_pct` values of the strategies in one account should sum to <= 1.0 (checked by a unit test).
+
+**Things worth knowing**
+- **Crypto needs cash, not margin.** Alpaca won't margin crypto. `get_target_qty` caps a crypto buy at `non_marginable_buying_power`, so a crypto account that has spent its cash gets a smaller order instead of a rejection.
+- **Alpaca takes the crypto fee out of the coins you receive** (a 0.000376 BTC buy leaves 0.00037506), so a full sell can never reach exactly zero. Positions worth under $1 are treated as flat (`CryptoAsset.dust_usd`).
+- **One trading strategy per symbol** (positions are per symbol; two strategies on BTC would fight). A backtest mixes only same-calendar assets: `load_ohlcv` raises if you mix stocks and crypto, since trimming to common timestamps would silently drop every crypto weekend.
+- The EOD summary notification is still AAPL-specific. The dashboard is per strategy (see "Dashboard" below).
+- Not ported to the registry: `tests/ibit_overnight` (it trades the open/close gap, which has no meaning on a market that never closes).
+
 ## Live Trading (AAPL SMA)
 
-The first strategy graduated from `tests/sma/` into live (currently **paper**) execution. Three entrypoints, each scheduled by its own GitHub Actions workflow — see "Automation" below for how and when:
+The first strategy graduated from `tests/sma/` into live (currently **paper**) execution; it is now the registered `aapl_sma` strategy run by the generic engine above (checked identical to the old signal over a year of AAPL history). Three entrypoints, each scheduled by its own GitHub Actions workflow — see "Automation" below for how and when:
 
 - `python -m src.trading.run_daily` — runs once per trading day at 9:45am America/Chicago. Order of operations: is the kill switch already tripped? → is the market even open? → has max drawdown breached? → has today's loss limit breached? → compute today's signal from fresh bars → size and submit a marketable-limit rebalance order if the signal implies a different position, otherwise just hold. **Always sends a notification** either way — a "BOUGHT/SOLD" message on an actual trade, or a daily check-in message ("signal long, holding N shares, no trade needed") when nothing changed, so silence never has to be interpreted as "did this even run today?"
 - `python -m src.trading.eod_summary` — runs once after close, at 4:00pm America/Chicago: sends a notification with today's equity, today's PnL, **total PnL since the strategy's first trade** (not since the account was funded — see "Dashboard" below for why that distinction matters), drawdown, and position size.
@@ -161,7 +213,7 @@ The first strategy graduated from `tests/sma/` into live (currently **paper**) e
 
 ## Automation (GitHub Actions)
 
-Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `intraday_check.yml`) run the three entrypoints above, each started via `workflow_dispatch` (by cron-job.org, or by hand). Requires three repo secrets: `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `NTFY_TOPIC`.
+Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `intraday_check.yml`) run the three entrypoints above, each started via `workflow_dispatch` (by cron-job.org, or by hand). Requires repo secrets `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `NTFY_TOPIC` and, for crypto, `ALPACA_CRYPTO_API_KEY` and `ALPACA_CRYPTO_API_SECRET` (the second account; an unset secret just means "no crypto account").
 
 **Scheduling**: the workflows have no `cron:` of their own. GitHub's `schedule:` trigger is best-effort and UTC-only: logged `run_daily` runs landed 3-7 hours after target and about 29% found the market already closed. Instead, [cron-job.org](https://cron-job.org) calls each workflow's `workflow_dispatch` endpoint (a fine-grained token limited to this repo with Actions write) at the right America/Chicago time, so DST is handled on its side. Targets: `run_daily` 9:45am, `intraday_check` hourly 10am-3pm, `eod_summary` 4:00pm. The same-day order ID (`AAPL-sma-<date>`) and `eod_summary`'s dedup guard protect against a duplicate dispatch.
 
@@ -173,11 +225,17 @@ Three workflows in `.github/workflows/` (`run_daily.yml`, `eod_summary.yml`, `in
 
 ## Dashboard (GitHub Pages)
 
-`src/dashboard/build_dashboard.py` renders a single static `index.html` (styled to match jameslaprocido.com, no JavaScript — the only external asset is the Google Fonts stylesheet; the equity curve is inline SVG) from `data/orders/trade_log.csv` plus Alpaca's live account/portfolio-history endpoints: current equity, today's PnL, **total PnL**, drawdown from peak, annualized Sharpe ratio, position size, a halted-status banner when relevant, an equity chart (with auto-scaled `$`/date axes) comparing the strategy against a live AAPL buy-and-hold benchmark, and a recent-activity table. No database — the CSV and Alpaca's own API are the only sources of truth, matching the rest of this system's design.
+`src/dashboard/build_dashboard.py` renders a single static `index.html` (styled to match jameslaprocido.com, no JavaScript � the only external asset is the Google Fonts stylesheet; charts are inline SVG) from Alpaca's live account data, Alpaca's order history and `data/orders/trade_log.csv`. No database.
 
-**The chart/Total-PnL/Sharpe window starts at the strategy's first trade, not the account's funding date** — `executor.find_strategy_start_date()` reads the trade log for the earliest `filled` order and uses that as the boundary, trimming `risk_manager.get_real_equity_history()`'s output (which itself already strips Alpaca's own padding: every day before the account had *any* activity comes back as a literal `0.0`, not `None`) to start there. This matters because an account can sit funded-but-flat for weeks before the strategy's first real trade — counting that idle stretch as part of "the strategy's performance" would understate a real edge (all those zero-return days dilute Sharpe) and make the buy-and-hold comparison meaningless (the benchmark would show whatever AAPL did while the bot was doing literally nothing). The window is fully dynamic — it's whatever the trade log says today, not a hardcoded range — and both series (strategy and benchmark) always use the identical window so they stay directly comparable.
+**Headline tiles** add the two accounts together (total equity, today's PnL, total PnL in dollar-weighted percent, open positions). There is no combined return chart: the two accounts start on different days and are different sizes, so a single curve would be misleading. Instead each account gets its own section: tiles (equity, today's PnL, total PnL, drawdown, Sharpe, open positions), a halted banner when relevant, and an equity chart against buy-and-hold: **SPY** for the stock account, **BTC** for the crypto account. With no crypto keys the crypto section is replaced by a one-line notice.
 
-It's a **build step, not a server**: every one of the three workflows (`run_daily`, `eod_summary`, `intraday_check`) runs it as its last step and publishes the result via `actions/upload-pages-artifact` + `actions/deploy-pages`, so the page refreshes on whatever cadence the workflow that happened to run last dictates — up to roughly hourly during market hours via `intraday_check`. The generated `public/` directory is never committed to the repo (gitignored) — it only exists transiently on the runner between generation and upload.
+**One card per live strategy** (every registry entry with `allocation_pct > 0`; research-only strategies are just listed): return on its sleeve, **vs. buy-and-hold of its own symbols** (BTC for `btc_sma`, AAPL for `aapl_sma`), PnL, current position, Sharpe, max drawdown, trade count, an equity curve against its benchmark, and a last-run line (signal and status from the trade log). A strategy that hasn't traded yet still gets a card, saying it is waiting for its first fill.
+
+**How per-strategy curves work** (`src/dashboard/performance.py`): Alpaca only knows the whole account's equity, so each strategy's curve is rebuilt from its own filled orders (read from the account the strategy trades in): `value = sleeve + cash flow from its fills + shares held x daily close`. The sleeve is `allocation_pct` x that account's equity on the strategy's first fill day, so a 2x strategy's swings show up at 2x. Orders are attributed to a strategy by symbol (one trading strategy per symbol). Two limits: prices are daily closes, and crypto fees that Alpaca takes in coins are not modeled. On real AAPL data this reconstruction came within about 0.1% of the account's own return (-4.96% vs. -5.03%; the rest is margin interest). **It reads Alpaca's order history, not the trade log**, because risk liquidations (`close_position`) never write their fills to the trade log, and a curve built from the log kept a ghost position of 147 AAPL shares in an account that had been flat for days. Only the latest 500 closed orders are read.
+
+**The portfolio chart/Total-PnL/Sharpe window starts at the first trade, not the account's funding date** — `executor.find_strategy_start_date()` reads the trade log for the earliest `filled` order and uses that as the boundary, trimming `risk_manager.get_real_equity_history()`'s output (which itself already strips Alpaca's own padding: every day before the account had *any* activity comes back as a literal `0.0`, not `None`) to start there. This matters because an account can sit funded-but-flat for weeks before the strategy's first real trade — counting that idle stretch as part of "the strategy's performance" would understate a real edge (all those zero-return days dilute Sharpe) and make the buy-and-hold comparison meaningless (the benchmark would show whatever AAPL did while the bot was doing literally nothing). The window is fully dynamic — it's whatever the trade log says today, not a hardcoded range — and both series (strategy and benchmark) always use the identical window so they stay directly comparable.
+
+It's a **build step, not a server**: every workflow (`run_daily`, `eod_summary`, `intraday_check` and `run_strategy`, the last one best-effort so a Pages collision never fails a trade run) runs it as its last step and publishes the result via `actions/upload-pages-artifact` + `actions/deploy-pages`, so the page refreshes on whatever cadence the workflow that happened to run last dictates — up to roughly hourly during market hours via `intraday_check`. The generated `public/` directory is never committed to the repo (gitignored) — it only exists transiently on the runner between generation and upload.
 
 **One manual step required** (can't be done via a file change): in the repo's Settings → Pages, set **Source** to **"GitHub Actions"** (not the older branch-based option) — this is what makes the `actions/deploy-pages` step have somewhere to publish to. After that, the workflows handle everything else.
 
