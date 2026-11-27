@@ -63,3 +63,4 @@ timestamp,symbol,strategy,signal,side,qty,limit_price,client_order_id,status,fil
 2026-11-24T14:45:34.549189+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
 2026-11-25T14:45:29.919447+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
 2026-11-26T14:45:35.864983+00:00,AAPL,sma,,,0,,,market_closed,,,
+2026-11-27T14:45:35.921888+00:00,AAPL,sma,1,,0,,,signal_unchanged,,,
